@@ -24,6 +24,85 @@ import {
 import { CHARACTER_LIMIT } from "./constants.js";
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * RED-213: Safe truncation that avoids cutting mid-surrogate-pair.
+ */
+function safeTruncate(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  let truncated = text.slice(0, limit);
+  // If last char is a high surrogate (0xD800-0xDBFF), remove it to avoid orphan
+  const lastCode = truncated.charCodeAt(truncated.length - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated;
+}
+
+function clampTextResponse(text: string, suffix: string): string {
+  if (text.length <= CHARACTER_LIMIT) return text;
+  const budget = Math.max(0, CHARACTER_LIMIT - suffix.length);
+  return `${safeTruncate(text, budget)}${suffix}`;
+}
+
+function summarizeJsonValue(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value !== "object") return value;
+
+  if (Array.isArray(value)) {
+    const limit = depth === 0 ? 8 : 5;
+    const items = value.slice(0, limit).map((item) => summarizeJsonValue(item, depth + 1));
+    if (value.length > limit) {
+      items.push({ _truncatedItems: value.length - limit });
+    }
+    return items;
+  }
+
+  const entries = Object.entries(value);
+  const limit = depth === 0 ? 16 : 10;
+  const summarizedEntries = entries.slice(0, limit).map(([key, entryValue]) => [
+    key,
+    summarizeJsonValue(entryValue, depth + 1),
+  ]);
+
+  if (entries.length > limit) {
+    summarizedEntries.push(["_truncatedKeys", entries.length - limit]);
+  }
+
+  return Object.fromEntries(summarizedEntries);
+}
+
+function clampJsonResponse(value: unknown, note: string): string {
+  const full = JSON.stringify(value, null, 2);
+  if (full.length <= CHARACTER_LIMIT) return full;
+
+  const summarized = {
+    truncated: true,
+    note,
+    data: summarizeJsonValue(value),
+  };
+  const summarizedText = JSON.stringify(summarized, null, 2);
+  if (summarizedText.length <= CHARACTER_LIMIT) return summarizedText;
+
+  const minimal = JSON.stringify({ truncated: true, note }, null, 2);
+  if (minimal.length >= CHARACTER_LIMIT) {
+    return safeTruncate(minimal, CHARACTER_LIMIT);
+  }
+
+  const previewBudget = Math.max(0, CHARACTER_LIMIT - minimal.length - 32);
+  return JSON.stringify(
+    {
+      truncated: true,
+      note,
+      preview: safeTruncate(full, previewBudget),
+    },
+    null,
+    2
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
@@ -100,13 +179,15 @@ Examples:
 
       let text: string;
       if (response_format === ResponseFormat.JSON) {
-        text = JSON.stringify(parsed, null, 2);
+        text = clampJsonResponse(
+          parsed,
+          "Response truncated. Use apple_docs_get_page with a specific framework path to get details."
+        );
       } else {
-        text = formatTechnologiesMarkdown(parsed);
-      }
-
-      if (text.length > CHARACTER_LIMIT) {
-        text = text.slice(0, CHARACTER_LIMIT) + "\n\n*(Response truncated — use apple_docs_get_page with a specific framework path to get details.)*";
+        text = clampTextResponse(
+          formatTechnologiesMarkdown(parsed),
+          "\n\n*(Response truncated — use apple_docs_get_page with a specific framework path to get details.)*"
+        );
       }
 
       return { content: [{ type: "text", text }] };
@@ -196,15 +277,15 @@ Error Handling:
 
       let text: string;
       if (response_format === ResponseFormat.JSON) {
-        text = JSON.stringify(parsed, null, 2);
+        text = clampJsonResponse(
+          parsed,
+          "Response truncated. Use a more specific path to get details on a particular symbol."
+        );
       } else {
-        text = formatDocPageMarkdown(parsed);
-      }
-
-      if (text.length > CHARACTER_LIMIT) {
-        text =
-          text.slice(0, CHARACTER_LIMIT) +
-          "\n\n*(Response truncated. Use a more specific path to get details on a particular symbol.)*";
+        text = clampTextResponse(
+          formatDocPageMarkdown(parsed),
+          "\n\n*(Response truncated. Use a more specific path to get details on a particular symbol.)*"
+        );
       }
 
       return { content: [{ type: "text", text }] };
@@ -298,22 +379,20 @@ apple_docs_get_page directly (e.g. path="swiftui/animation").`,
 
       let text: string;
       if (response_format === ResponseFormat.JSON) {
-        text = JSON.stringify(
+        text = clampJsonResponse(
           {
             query,
             framework: framework_path,
             count: results.length,
             results,
           },
-          null,
-          2
+          "Response truncated. Reduce limit or refine your query."
         );
       } else {
-        text = formatSearchResultsMarkdown(results, query, framework_path);
-      }
-
-      if (text.length > CHARACTER_LIMIT) {
-        text = text.slice(0, CHARACTER_LIMIT) + "\n\n*(Response truncated — reduce limit or refine your query.)*";
+        text = clampTextResponse(
+          formatSearchResultsMarkdown(results, query, framework_path),
+          "\n\n*(Response truncated — reduce limit or refine your query.)*"
+        );
       }
 
       return { content: [{ type: "text", text }] };
@@ -379,7 +458,7 @@ Note: This can be very large. Prefer apple_docs_get_page for most use cases.`,
           primaryContentSections: page.primaryContentSections,
           _note: `Response truncated. Full references map omitted (${Object.keys(page.references ?? {}).length} entries). Use apple_docs_get_page for formatted output.`,
         };
-        text = JSON.stringify(trimmed, null, 2);
+        text = clampJsonResponse(trimmed, "Response truncated. Use apple_docs_get_page for formatted output.");
       }
 
       return { content: [{ type: "text", text }] };

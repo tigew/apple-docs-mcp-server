@@ -37,10 +37,9 @@ An MCP (Model Context Protocol) server that gives Claude and other LLMs direct a
 ### Claude Code (easiest)
 
 ```bash
-git clone https://github.com/tigew/apple-docs-mcp-server.git
-cd apple-docs-mcp-server
-npm install && npm run build
-claude mcp add apple-docs -- node $(pwd)/dist/index.js
+git clone https://github.com/tigew/apple-docs-mcp-server.git ~/apple-docs-mcp-server
+cd ~/apple-docs-mcp-server && npm install && npm run build
+claude mcp add apple-docs -- node ~/apple-docs-mcp-server/dist/index.js
 ```
 
 Done. The last command registers it automatically — no config files to edit.

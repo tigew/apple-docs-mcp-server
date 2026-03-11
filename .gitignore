@@ -16,6 +16,7 @@ node_modules/
 .idea/
 *.swp
 *.swo
+.serena/
 
 # OS
 .DS_Store

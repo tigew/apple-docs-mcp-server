@@ -39,10 +39,10 @@ An MCP (Model Context Protocol) server that gives Claude and other LLMs direct a
 ```bash
 git clone https://github.com/tigew/apple-docs-mcp-server.git ~/apple-docs-mcp-server
 cd ~/apple-docs-mcp-server && npm install && npm run build
-claude mcp add apple-docs -- node ~/apple-docs-mcp-server/dist/index.js
+claude mcp add --scope global apple-docs -- node ~/apple-docs-mcp-server/dist/index.js
 ```
 
-Done. The last command registers it automatically — no config files to edit.
+Done. The `--scope global` flag makes it available in every project, not just this folder.
 
 ---
 

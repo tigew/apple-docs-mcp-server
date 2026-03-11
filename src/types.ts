@@ -29,6 +29,9 @@ export interface AppleDocInlineContent {
   code?: string;
   identifier?: string;
   isActive?: boolean;
+  inlineContent?: AppleDocInlineContent[];
+  title?: string;
+  destination?: string;
 }
 
 export interface AppleDocContentItem {
@@ -109,6 +112,14 @@ export interface AppleDocHierarchy {
   paths: string[][];
 }
 
+// REFACTOR SHOULD-FIX-4: Proper type for page sections (used in /technologies endpoint)
+export interface AppleDocSection {
+  kind?: string;
+  title?: string;
+  groups?: Array<{ identifiers?: string[] }>;
+  identifiers?: string[];
+}
+
 export interface AppleDocPage {
   identifier: AppleDocIdentifier;
   kind: string;
@@ -121,7 +132,7 @@ export interface AppleDocPage {
   references: Record<string, AppleDocReference>;
   hierarchy?: AppleDocHierarchy;
   variants?: Array<{ traits: Array<{ interfaceLanguage: string }>; paths: string[] }>;
-  sections?: unknown[];
+  sections?: AppleDocSection[];
   schemaVersion?: { major: number; minor: number; patch: number };
 }
 
@@ -148,6 +159,16 @@ export interface ParsedSymbol {
     title: string;
     type: string;
     items: Array<{ title: string; url: string }>;
+  }>;
+  seeAlsoSections: Array<{
+    title: string;
+    items: Array<{
+      title: string;
+      url: string;
+      abstract: string;
+      kind: string;
+      role: string;
+    }>;
   }>;
   overview: string;
 }

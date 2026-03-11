@@ -139,6 +139,9 @@ This MCP server fetches and parses those JSON files, extracting declarations, ab
 # Watch mode (auto-recompile on changes)
 npm run dev
 
+# Offline parser/formatter regression suite
+npm test
+
 # Clean build artifacts
 npm run clean && npm run build
 ```

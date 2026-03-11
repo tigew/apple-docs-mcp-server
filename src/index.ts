@@ -24,6 +24,24 @@ import {
 import { CHARACTER_LIMIT } from "./constants.js";
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * RED-213: Safe truncation that avoids cutting mid-surrogate-pair.
+ */
+function safeTruncate(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  let truncated = text.slice(0, limit);
+  // If last char is a high surrogate (0xD800-0xDBFF), remove it to avoid orphan
+  const lastCode = truncated.charCodeAt(truncated.length - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated;
+}
+
+// ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
@@ -106,7 +124,7 @@ Examples:
       }
 
       if (text.length > CHARACTER_LIMIT) {
-        text = text.slice(0, CHARACTER_LIMIT) + "\n\n*(Response truncated — use apple_docs_get_page with a specific framework path to get details.)*";
+        text = safeTruncate(text, CHARACTER_LIMIT) + "\n\n*(Response truncated — use apple_docs_get_page with a specific framework path to get details.)*";
       }
 
       return { content: [{ type: "text", text }] };
@@ -313,7 +331,7 @@ apple_docs_get_page directly (e.g. path="swiftui/animation").`,
       }
 
       if (text.length > CHARACTER_LIMIT) {
-        text = text.slice(0, CHARACTER_LIMIT) + "\n\n*(Response truncated — reduce limit or refine your query.)*";
+        text = safeTruncate(text, CHARACTER_LIMIT) + "\n\n*(Response truncated — reduce limit or refine your query.)*";
       }
 
       return { content: [{ type: "text", text }] };
@@ -380,6 +398,11 @@ Note: This can be very large. Prefer apple_docs_get_page for most use cases.`,
           _note: `Response truncated. Full references map omitted (${Object.keys(page.references ?? {}).length} entries). Use apple_docs_get_page for formatted output.`,
         };
         text = JSON.stringify(trimmed, null, 2);
+
+        // Re-check after trimming — primaryContentSections can still be large
+        if (text.length > CHARACTER_LIMIT) {
+          text = safeTruncate(text, CHARACTER_LIMIT) + "\n...(truncated)";
+        }
       }
 
       return { content: [{ type: "text", text }] };

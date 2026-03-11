@@ -340,7 +340,6 @@ export function normalizePath(path: string): string {
   if (!normalized) {
     throw new Error(`Invalid path "${path}": no documentation path remained after normalization.`);
   }
-
   return normalized;
 }
 

@@ -142,7 +142,6 @@ export interface AppleDocGroup {
   identifiers?: string[];
   technologies?: AppleDocTechnologyEntry[];
 }
-
 export interface AppleDocPage {
   identifier: AppleDocIdentifier;
   kind: string;

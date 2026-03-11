@@ -31,46 +31,58 @@ An MCP (Model Context Protocol) server that gives Claude and other LLMs direct a
 ### Prerequisites
 
 - **Node.js 18+** — [nodejs.org](https://nodejs.org)
-- **Claude Desktop** (or any MCP-compatible client)
 
-### 1. Set up the project
+---
+
+### Claude Code (easiest)
 
 ```bash
-# Navigate to the folder
+git clone https://github.com/tigew/apple-docs-mcp-server.git
 cd apple-docs-mcp-server
-
-# Install dependencies
-npm install
-
-# Build
-npm run build
+npm install && npm run build
+claude mcp add apple-docs -- node $(pwd)/dist/index.js
 ```
 
-### 2. Configure Claude Desktop
+Done. The last command registers it automatically — no config files to edit.
 
-Open your Claude Desktop config file:
+---
+
+### Claude Desktop
+
+**Step 1** — Clone and build:
+
+```bash
+git clone https://github.com/tigew/apple-docs-mcp-server.git
+cd apple-docs-mcp-server
+npm install && npm run build
+pwd  # copy this path — you'll need it in the next step
+```
+
+**Step 2** — Open your Claude Desktop config:
 
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-Add the server under `mcpServers`:
+**Step 3** — Add the server:
 
 ```json
 {
   "mcpServers": {
     "apple-docs": {
       "command": "node",
-      "args": ["/ABSOLUTE/PATH/TO/apple-docs-mcp-server/dist/index.js"]
+      "args": ["/paste/your/path/here/apple-docs-mcp-server/dist/index.js"]
     }
   }
 }
 ```
 
-Replace `/ABSOLUTE/PATH/TO/` with the actual path to this folder. Then restart Claude Desktop.
+**Step 4** — Restart Claude Desktop.
 
-### 3. Verify it's working
+---
 
-In Claude, ask: *"List all Apple developer frameworks"* — Claude should call `apple_docs_list_technologies` and return a categorized list.
+### Verify it's working
+
+Ask Claude: *"List all Apple developer frameworks"* — it should call `apple_docs_list_technologies` and return a categorized list.
 
 ---
 

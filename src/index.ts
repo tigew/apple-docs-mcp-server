@@ -14,6 +14,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   fetchDocPage,
+  normalizePath,
   parseDocPage,
   parseTechnologies,
   searchFramework,
@@ -27,16 +28,46 @@ import { CHARACTER_LIMIT } from "./constants.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+const MAX_SUMMARIZE_DEPTH = 10;
+
 /**
- * RED-213: Safe truncation that avoids cutting mid-surrogate-pair.
+ * Safe truncation that avoids cutting mid-surrogate-pair.
  */
 function safeTruncate(text: string, limit: number): string {
+  if (limit <= 0) return "";
   if (text.length <= limit) return text;
   let truncated = text.slice(0, limit);
   // If last char is a high surrogate (0xD800-0xDBFF), remove it to avoid orphan
   const lastCode = truncated.charCodeAt(truncated.length - 1);
   if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
     truncated = truncated.slice(0, -1);
+  }
+  // If last char is a low surrogate (0xDC00-0xDFFF) without a preceding high, remove it
+  if (truncated.length > 0) {
+    const finalCode = truncated.charCodeAt(truncated.length - 1);
+    if (finalCode >= 0xdc00 && finalCode <= 0xdfff) {
+      // Check if preceded by a high surrogate
+      if (truncated.length < 2 || truncated.charCodeAt(truncated.length - 2) < 0xd800 || truncated.charCodeAt(truncated.length - 2) > 0xdbff) {
+        truncated = truncated.slice(0, -1);
+      }
+    }
+  }
+  // Avoid cutting mid-JSON-escape-sequence (e.g., \uXXXX, \n, \t, \\)
+  // If truncation ends with a trailing backslash that starts an incomplete escape, trim it
+  if (truncated.length > 0) {
+    // Count trailing backslashes — an odd number means the last one is an escape prefix
+    let trailingBackslashes = 0;
+    for (let i = truncated.length - 1; i >= 0 && truncated[i] === "\\"; i--) {
+      trailingBackslashes++;
+    }
+    if (trailingBackslashes % 2 === 1) {
+      truncated = truncated.slice(0, -1);
+    }
+    // Check for incomplete \uXXXX sequence (backslash + u + fewer than 4 hex chars at end)
+    const uEscapeMatch = truncated.match(/\\u[0-9a-fA-F]{0,3}$/);
+    if (uEscapeMatch) {
+      truncated = truncated.slice(0, -uEscapeMatch[0].length);
+    }
   }
   return truncated;
 }
@@ -48,6 +79,7 @@ function clampTextResponse(text: string, suffix: string): string {
 }
 
 function summarizeJsonValue(value: unknown, depth = 0): unknown {
+  if (depth > MAX_SUMMARIZE_DEPTH) return "[nested]";
   if (value === null || typeof value !== "object") return value;
 
   if (Array.isArray(value)) {
@@ -90,8 +122,9 @@ function clampJsonResponse(value: unknown, note: string): string {
     return safeTruncate(minimal, CHARACTER_LIMIT);
   }
 
-  const previewBudget = Math.max(0, CHARACTER_LIMIT - minimal.length - 32);
-  return JSON.stringify(
+  // Use a conservative budget and verify the final output fits
+  const previewBudget = Math.max(0, CHARACTER_LIMIT - minimal.length - 100);
+  const result = JSON.stringify(
     {
       truncated: true,
       note,
@@ -100,6 +133,13 @@ function clampJsonResponse(value: unknown, note: string): string {
     null,
     2
   );
+
+  // Final safety check: if JSON escaping caused the result to exceed the limit, re-truncate
+  if (result.length > CHARACTER_LIMIT) {
+    return safeTruncate(result, CHARACTER_LIMIT);
+  }
+
+  return result;
 }
 // ---------------------------------------------------------------------------
 // Enums
@@ -215,26 +255,35 @@ The path corresponds to the URL path at developer.apple.com/documentation/{path}
   - Article:           "swiftui/declaring-a-custom-view"
   - Nested symbol:     "swiftui/view/body-swift.property"
 
-Returns rich documentation including: abstract, Swift declaration, full documentation prose, topic sections (with child symbols), platform availability, and relationship info (inheritance, conformances).
+Returns rich documentation including: abstract, Swift declaration, parameters, full documentation prose, topic sections (with child symbol paths you can pass directly to this tool), platform availability, deprecation status, hierarchy breadcrumb, and relationship info (inheritance, conformances).
 
 Args:
   - path (string): The documentation path (everything after /documentation/ in the Apple docs URL). Case-insensitive.
   - response_format ('markdown' | 'json'): Output format (default: 'markdown')
 
 Returns:
-  For markdown: Formatted documentation including declaration, overview, topics, and relationships.
+  For markdown: Formatted documentation including declaration, parameters, overview, topics, and relationships.
   For JSON: Full parsed symbol object:
   {
     "title": string,
     "kind": string,             // e.g. "symbol", "article"
     "role": string,             // e.g. "symbol", "collection", "article"
+    "roleHeading": string,      // e.g. "Instance Method", "Structure"
+    "module": string,           // e.g. "Swift", "SwiftUI"
     "abstract": string,
     "declaration": string,      // Swift declaration (if applicable)
+    "parameters": [             // Function/method parameters (if applicable)
+      { "name": string, "description": string }
+    ],
     "platforms": [...],
-    "path": string,
+    "deprecated": boolean,      // true if deprecated on all platforms
+    "deprecatedAt": string,     // Platform-specific deprecation versions
+    "breadcrumb": string[],     // Hierarchy path (e.g. ["Swift", "Array"])
+    "path": string,             // Usable as input to this tool
     "webUrl": string,
-    "topicSections": [...],
+    "topicSections": [...],     // Child symbols with paths usable as input to this tool
     "relationships": [...],
+    "seeAlsoSections": [...],
     "overview": string
   }
 
@@ -374,14 +423,15 @@ apple_docs_get_page directly (e.g. path="swiftui/animation").`,
   },
   async ({ framework_path, query, limit, response_format }) => {
     try {
-      const results = await searchFramework(framework_path, query, limit);
+      const normalizedFrameworkPath = normalizePath(framework_path);
+      const results = await searchFramework(normalizedFrameworkPath, query, limit);
 
       let text: string;
       if (response_format === ResponseFormat.JSON) {
         text = clampJsonResponse(
           {
             query,
-            framework: framework_path,
+            framework: normalizedFrameworkPath,
             count: results.length,
             results,
           },
@@ -389,7 +439,7 @@ apple_docs_get_page directly (e.g. path="swiftui/animation").`,
         );
       } else {
         text = clampTextResponse(
-          formatSearchResultsMarkdown(results, query, framework_path),
+          formatSearchResultsMarkdown(results, query, normalizedFrameworkPath),
           "\n\n*(Response truncated — reduce limit or refine your query.)*"
         );
       }
@@ -479,6 +529,16 @@ async function main(): Promise<void> {
   await server.connect(transport);
   console.error("Apple Developer Documentation MCP server running via stdio");
 }
+
+// Graceful shutdown
+function shutdown(): void {
+  console.error("Shutting down MCP server...");
+  server.close().catch(() => {});
+  process.exit(0);
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 main().catch((error: unknown) => {
   console.error("Fatal server error:", error);

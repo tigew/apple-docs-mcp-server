@@ -17,6 +17,7 @@ import {
   AppleDocContentItem,
   AppleDocFragment,
   AppleDocReference,
+  AppleDocParameter,
   ParsedSymbol,
   ParsedTechnologies,
   SearchResult,
@@ -31,6 +32,7 @@ const httpClient = axios.create({
   timeout: REQUEST_TIMEOUT_MS,
   maxContentLength: 10 * 1024 * 1024, // 10MB - RED-201
   maxBodyLength: 10 * 1024 * 1024,    // 10MB - RED-201
+  maxRedirects: 3, // Limit redirects to prevent redirect-chain SSRF
   headers: {
     Accept: "application/json",
     "User-Agent": "apple-docs-mcp-server/1.0",
@@ -39,20 +41,170 @@ const httpClient = axios.create({
 
 const SEARCH_CHILD_PAGE_LIMIT = 60;
 const SEARCH_DIRECT_MATCH_LIMIT = 12;
+const SEARCH_CONCURRENCY_LIMIT = 8;
+const MAX_RECURSION_DEPTH = 40;
+
+// ---------------------------------------------------------------------------
+// Concurrency limiter for search fetches (BUG-1 fix)
+// ---------------------------------------------------------------------------
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      try {
+        results[index] = { status: "fulfilled", value: await fn(items[index]) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Page cache (simple TTL to avoid redundant fetches)
+// ---------------------------------------------------------------------------
+
+const PAGE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const PAGE_CACHE_MAX_SIZE = 100;
+
+interface CachedPage {
+  page: AppleDocPage;
+  expiresAt: number;
+}
+
+const pageCache = new Map<string, CachedPage>();
+
+// Proactive cache cleanup: purge expired entries periodically to prevent
+// stale accumulation when entries are never re-accessed
+const CACHE_CLEANUP_INTERVAL_MS = 60 * 1000; // 1 minute
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of pageCache) {
+    if (now > entry.expiresAt) {
+      pageCache.delete(key);
+    }
+  }
+}, CACHE_CLEANUP_INTERVAL_MS).unref(); // unref so it doesn't keep the process alive
+
+function getCachedPage(normalizedPath: string): AppleDocPage | undefined {
+  const entry = pageCache.get(normalizedPath);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    pageCache.delete(normalizedPath);
+    return undefined;
+  }
+  // LRU: move to end by re-inserting (Map preserves insertion order)
+  pageCache.delete(normalizedPath);
+  pageCache.set(normalizedPath, entry);
+  return entry.page;
+}
+
+function setCachedPage(normalizedPath: string, page: AppleDocPage): void {
+  // If already present, delete first so re-insert moves it to the end (LRU)
+  if (pageCache.has(normalizedPath)) {
+    pageCache.delete(normalizedPath);
+  }
+  // Evict least-recently-used (first entry) if at capacity
+  if (pageCache.size >= PAGE_CACHE_MAX_SIZE) {
+    const firstKey = pageCache.keys().next().value;
+    if (firstKey !== undefined) pageCache.delete(firstKey);
+  }
+  pageCache.set(normalizedPath, { page, expiresAt: Date.now() + PAGE_CACHE_TTL_MS });
+}
+
+// ---------------------------------------------------------------------------
+// Path utilities (unified — fixes BUG-9 divergent stripping)
+// ---------------------------------------------------------------------------
+
+function stripDocPrefix(url: string): string {
+  return url
+    .replace(/^doc:\/\/[^/]*\/documentation\//i, "")
+    .replace(/^https?:\/\/developer\.apple\.com/i, "")
+    .replace(/^\/+documentation\//i, "")
+    .replace(/^documentation\//i, "");
+}
+
+function extractPathFromDocUrl(url: string): string {
+  // Use pathFromDocUrl which handles doc://, https://, and /documentation/ prefixes
+  const resolved = pathFromDocUrl(url);
+  if (resolved) return resolved;
+  // Fallback: strip /documentation/ prefix and normalize
+  const raw = url.replace(/^\/documentation\//i, "").toLowerCase();
+  try {
+    return normalizePath(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function buildWebUrl(path: string): string {
+  return `${APPLE_DOCS_WEB_BASE}/${path}`;
+}
+
+// ---------------------------------------------------------------------------
+// Core functions
+// ---------------------------------------------------------------------------
+
+// In-flight request deduplication: avoid fetching the same URL concurrently
+// (e.g., during parallel search where multiple workers request the same child page)
+const inflightRequests = new Map<string, Promise<AppleDocPage>>();
 
 function rawFetchDocPage(normalizedPath: string): Promise<AppleDocPage> {
+  const existing = inflightRequests.get(normalizedPath);
+  if (existing) return existing;
+
   const url = `${APPLE_DOCS_BASE_URL}/documentation/${normalizedPath}.json`;
-  return httpClient.get<AppleDocPage>(url).then((response) => response.data);
+  const promise = httpClient.get<AppleDocPage>(url).then((response) => {
+    const data = response.data;
+    // Guard against non-JSON responses (e.g., HTML redirect pages)
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error(`Unexpected response format for "${normalizedPath}": expected JSON object.`);
+    }
+    return data;
+  }).finally(() => {
+    inflightRequests.delete(normalizedPath);
+  });
+
+  inflightRequests.set(normalizedPath, promise);
+  return promise;
 }
 
 function pathFromDocUrl(url: string | undefined): string | null {
   if (!url) return null;
+
+  // Handle doc:// URIs (e.g. doc://com.apple.SwiftUI/documentation/SwiftUI/View)
+  if (/^doc:\/\//i.test(url)) {
+    const withoutPrefix = stripDocPrefix(url);
+    if (!withoutPrefix) return null;
+    try {
+      return normalizePath(withoutPrefix);
+    } catch {
+      return null;
+    }
+  }
+
   if (/^https?:\/\//i.test(url) && !/^https?:\/\/developer\.apple\.com/i.test(url)) return null;
 
-  const withoutPrefix = stripAppleDocsPrefixes(url);
+  const withoutPrefix = stripDocPrefix(url);
   if (!withoutPrefix) return null;
 
-  return normalizePath(withoutPrefix);
+  try {
+    return normalizePath(withoutPrefix);
+  } catch {
+    return null;
+  }
 }
 
 function normalizeDocUrl(url: string): string {
@@ -83,7 +235,7 @@ function queryToLikelySlug(query: string): string {
   return query
     .trim()
     .toLowerCase()
-    .replace(/[’']/g, "")
+    .replace(/['']/g, "")
     .replace(/[^a-z0-9()_:]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
@@ -99,9 +251,9 @@ function createSearchResultFromPage(page: AppleDocPage, frameworkPath: string): 
   }
 
   return {
-    title: page.metadata?.title ?? path.split("/").pop() ?? path,
+    title: page.metadata?.title || path.split("/").pop() || path,
     path,
-    webUrl: `${APPLE_DOCS_WEB_BASE}/${path}`,
+    webUrl: buildWebUrl(path),
     abstract: extractText(page.abstract, page.references),
     kind: page.kind ?? "unknown",
     role: page.metadata?.role ?? "unknown",
@@ -156,8 +308,18 @@ export function resolveChildPathFromParentPage(page: AppleDocPage, parentPath: s
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  const exactTitle = candidates.find(({ ref }) => (ref.title ?? "").trim().toLowerCase() === targetLeaf);
-  if (exactTitle) return exactTitle.path;
+  // When multiple candidates match by title, prefer the one without a hash suffix
+  // (canonical path) to avoid resolving to deprecated overloads (BUG: flatMap resolved to deprecated)
+  const titleMatches = candidates.filter(({ ref }) => (ref.title ?? "").trim().toLowerCase() === targetLeaf);
+  if (titleMatches.length === 1) return titleMatches[0].path;
+  if (titleMatches.length > 1) {
+    // Prefer the candidate whose leaf exactly matches the target (no hash suffix)
+    const exactLeafTitle = titleMatches.find(({ leaf }) => leaf === targetLeaf);
+    if (exactLeafTitle) return exactLeafTitle.path;
+    // Prefer the candidate with the shortest path (fewer disambiguation suffixes)
+    const sorted = titleMatches.sort((a, b) => a.path.length - b.path.length);
+    return sorted[0].path;
+  }
 
   const exactLeaf = candidates.find(({ leaf }) => leaf === targetLeaf);
   if (exactLeaf) return exactLeaf.path;
@@ -183,10 +345,27 @@ async function resolvePathOn404(normalizedPath: string): Promise<string | null> 
 
   try {
     const parentPage = await rawFetchDocPage(parentPath);
-    return resolveChildPathFromParentPage(parentPage, parentPath, unresolvedLeaf);
+    const resolved = resolveChildPathFromParentPage(parentPage, parentPath, unresolvedLeaf);
+    if (resolved) return resolved;
   } catch {
-    return null;
+    // Parent page fetch failed — fall through to heuristic attempts below
   }
+
+  // For inherited symbols (e.g. Array.map(_:) inherited from Sequence),
+  // the parent page may not list the symbol at all. Try heuristic slug-based
+  // lookups with common hash suffixes by probing the API directly.
+  const likelySlug = queryToLikelySlug(unresolvedLeaf);
+  if (likelySlug && likelySlug !== unresolvedLeaf) {
+    const heuristicPath = `${parentPath}/${likelySlug}`;
+    try {
+      await rawFetchDocPage(heuristicPath);
+      return heuristicPath;
+    } catch {
+      // Heuristic path didn't work either
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -196,14 +375,23 @@ async function resolvePathOn404(normalizedPath: string): Promise<string | null> 
 export async function fetchDocPage(path: string): Promise<AppleDocPage> {
   const normalizedPath = normalizePath(path);
 
+  // Check cache first
+  const cached = getCachedPage(normalizedPath);
+  if (cached) return cached;
+
   try {
-    return await rawFetchDocPage(normalizedPath);
+    const page = await rawFetchDocPage(normalizedPath);
+    setCachedPage(normalizedPath, page);
+    return page;
   } catch (error) {
     if (error instanceof AxiosError && error.response?.status === 404) {
       const resolvedPath = await resolvePathOn404(normalizedPath);
       if (resolvedPath && resolvedPath !== normalizedPath) {
         try {
-          return await rawFetchDocPage(resolvedPath);
+          const page = await rawFetchDocPage(resolvedPath);
+          setCachedPage(resolvedPath, page);
+          setCachedPage(normalizedPath, page); // cache alias → resolved page too
+          return page;
         } catch (retryError) {
           throw wrapFetchError(retryError, path);
         }
@@ -213,23 +401,18 @@ export async function fetchDocPage(path: string): Promise<AppleDocPage> {
   }
 }
 
-function stripAppleDocsPrefixes(path: string): string {
-  return path
-    .replace(/^https?:\/\/developer\.apple\.com/i, "")
-    .replace(/^\/+documentation\//i, "")
-    .replace(/^documentation\//i, "");
-}
-
 function stripLeafDisambiguation(leaf: string): string {
   let normalized = leaf.trim().toLowerCase();
   if (!normalized) return normalized;
 
   normalized = normalized.replace(/-(swift|objc|c|cpp)\.[a-z0-9._-]+$/i, "");
 
-  const opaqueSuffixMatch = normalized.match(/^(.*)-([a-z0-9]{4,6})$/i);
+  // Only strip opaque suffixes that look like Apple's hex hashes (4-5 lowercase alnum)
+  // and only when the prefix contains Swift symbol chars like () or :
+  const opaqueSuffixMatch = normalized.match(/^(.*)-([a-z0-9]{4,5})$/);
   if (opaqueSuffixMatch) {
     const prefix = opaqueSuffixMatch[1];
-    if (prefix && (!prefix.includes("-") || /[().:]/.test(prefix))) {
+    if (prefix && /[().:+!=<>]/.test(prefix)) {
       normalized = prefix;
     }
   }
@@ -290,7 +473,6 @@ export function dedupeSearchResults(results: SearchResult[]): SearchResult[] {
     const key = [
       canonicalSearchStem(result.path),
       result.title.trim().toLowerCase(),
-      result.abstract.trim().toLowerCase(),
       result.kind.trim().toLowerCase(),
       result.role.trim().toLowerCase(),
     ].join("\u0000");
@@ -307,22 +489,56 @@ export function normalizePath(path: string): string {
     throw new Error("Invalid path: must not be empty.");
   }
 
+  // Reject non-Apple HTTP URLs (SEC-011: anchor to hostname boundary to prevent subdomain bypass)
+  if (/^https?:\/\//i.test(trimmed) && !/^https?:\/\/developer\.apple\.com(\/|$)/i.test(trimmed)) {
+    throw new Error(
+      `Invalid path "${path}": only developer.apple.com documentation URLs are supported.`
+    );
+  }
+
+  // Reject dangerous URI schemes (data:, javascript:, ftp:, etc.)
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/^https?:\/\//i.test(trimmed) && !/^doc:\/\//i.test(trimmed)) {
+    throw new Error(
+      `Invalid path "${path}": unsupported URI scheme.`
+    );
+  }
+
   // RED-218: Reject paths containing control characters (codepoint < 0x20 or 0x7F-0x9F)
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1F\x7F-\x9F]/.test(trimmed)) {
     throw new Error(`Invalid path: contains control characters.`);
   }
 
-  // RED-202: Decode URL-encoded sequences before checking for traversal
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(trimmed);
-  } catch {
-    throw new Error(`Invalid path "${path}": contains malformed percent-encoding.`);
+  // Strip zero-width characters that could be used to bypass validation or confuse matching
+  // U+200B (zero-width space), U+200C/D (zero-width non-joiner/joiner), U+FEFF (BOM), U+200E/F (LTR/RTL marks)
+  if (/[\u200B\u200C\u200D\uFEFF\u200E\u200F\u2060\u2061\u2062\u2063\u2064]/.test(trimmed)) {
+    throw new Error(`Invalid path: contains invisible Unicode characters.`);
   }
 
-  // Accept full Apple docs URLs and /documentation/... inputs.
-  const withoutPrefix = stripAppleDocsPrefixes(decoded).replace(/[?#].*$/, "");
+  // RED-202: Decode URL-encoded sequences before checking for traversal
+  // Decode iteratively to catch double-encoding (BUG-15 fix)
+  let decoded = trimmed;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      if (i === 0) {
+        throw new Error(`Invalid path "${path}": contains malformed percent-encoding.`);
+      }
+      break;
+    }
+  }
+
+  // Re-check for control characters after decoding (encoded control chars)
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F-\x9F]/.test(decoded)) {
+    throw new Error(`Invalid path: contains control characters (after decoding).`);
+  }
+
+  // Accept full Apple docs URLs, doc:// URIs, and /documentation/... inputs.
+  const withoutPrefix = stripDocPrefix(decoded).replace(/[?#].*$/, "");
 
   // Strip leading slash, trailing slash, duplicate slashes, and .json suffix.
   const normalized = withoutPrefix
@@ -337,6 +553,11 @@ export function normalizePath(path: string): string {
     throw new Error(`Invalid path "${path}": path traversal ("..") is not allowed.`);
   }
 
+  // Reject paths with URL-unsafe characters that could alter request semantics
+  if (/[@;,]/.test(normalized)) {
+    throw new Error(`Invalid path "${path}": contains characters that are not allowed in documentation paths.`);
+  }
+
   if (!normalized) {
     throw new Error(`Invalid path "${path}": no documentation path remained after normalization.`);
   }
@@ -345,18 +566,37 @@ export function normalizePath(path: string): string {
 
 function wrapFetchError(error: unknown, path: string): Error {
   if (error instanceof AxiosError) {
-    if (error.response?.status === 404) {
+    const status = error.response?.status;
+    if (status === 404) {
       return new Error(
         `Documentation page not found for path "${path}". ` +
           `Check the path matches a valid Apple documentation URL (e.g. "swiftui/view", "swift/array", "foundation"). ` +
           `You can use apple_docs_list_technologies to discover framework names.`
       );
     }
-    if (error.response?.status === 403) {
+    if (status === 400) {
+      return new Error(
+        `Invalid documentation path "${path}". The path may contain unsupported characters. ` +
+          `Try a simpler path (e.g. "swiftui", "swift/array").`
+      );
+    }
+    if (status === 403) {
       return new Error(`Access denied fetching Apple documentation for "${path}".`);
     }
-    if (error.code === "ECONNABORTED") {
+    if (status === 429) {
+      return new Error(`Rate limited by Apple's documentation server. Please wait a moment and try again.`);
+    }
+    if (status && status >= 500) {
+      return new Error(
+        `Apple's documentation server returned an error for "${path}". ` +
+          `This is usually temporary — please try again shortly.`
+      );
+    }
+    if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
       return new Error(`Request timed out fetching documentation for "${path}". Please try again.`);
+    }
+    if (error.code === "ENOTFOUND" || error.code === "ECONNREFUSED") {
+      return new Error(`Unable to reach Apple's documentation server. Check your network connection.`);
     }
     return new Error(`Network error fetching "${path}": ${error.message}`);
   }
@@ -371,11 +611,12 @@ function resolveReferenceItems(
 
   return identifiers
     .map((id) => {
-      const ref = references[id];
+      const ref = Object.prototype.hasOwnProperty.call(references, id) ? references[id] : undefined;
       if (!ref) return null;
+      const refPath = pathFromDocUrl(ref.url);
       return {
         title: ref.title ?? id,
-        url: ref.url ?? "",
+        path: refPath ?? (ref.url ?? ""),
         abstract: extractText(ref.abstract, references),
         kind: ref.kind ?? "unknown",
         role: ref.role ?? "unknown",
@@ -393,7 +634,9 @@ function extractTechnologyItem(
   references: Record<string, AppleDocReference> | undefined
 ): ParsedTechnologies["sections"][number]["technologies"][number] | null {
   const destinationId = technology.destination?.identifier;
-  const ref = destinationId && references ? references[destinationId] : undefined;
+  const ref = destinationId && references
+    ? (Object.prototype.hasOwnProperty.call(references, destinationId) ? references[destinationId] : undefined)
+    : undefined;
   const abstract =
     extractText(ref?.abstract, references) ||
     extractText(technology.content, references);
@@ -426,7 +669,9 @@ function extractTechnologySectionFromGroup(
   }
 
   for (const identifier of group.identifiers ?? []) {
-    const ref = references?.[identifier];
+    const ref = references && Object.prototype.hasOwnProperty.call(references, identifier)
+      ? references[identifier]
+      : undefined;
     if (!ref?.url) continue;
       deduped.set(ref.url.toLowerCase(), {
         title: ref.title ?? identifier,
@@ -447,17 +692,16 @@ function extractTechnologySectionFromGroup(
 
 export function collectSearchPagePaths(page: AppleDocPage, frameworkPath: string, limit = SEARCH_CHILD_PAGE_LIMIT): string[] {
   const normalizedFramework = normalizePath(frameworkPath);
-  const frameworkUrlPrefix = `/documentation/${normalizedFramework}`;
   const childPages = new Set<string>();
 
   for (const ref of Object.values(page.references ?? {})) {
     if (!ref.url) continue;
-    const normalizedUrl = ref.url.toLowerCase();
-    if (!normalizedUrl.startsWith(frameworkUrlPrefix)) continue;
+    const path = pathFromDocUrl(ref.url);
+    if (!path) continue;
+    if (!(path === normalizedFramework || path.startsWith(`${normalizedFramework}/`))) continue;
     if (!["collectionGroup", "collection", "article"].includes(ref.role ?? "")) continue;
 
-    const path = ref.url.replace(/^\/documentation\//i, "");
-    if (path && path !== normalizedFramework) {
+    if (path !== normalizedFramework) {
       childPages.add(path);
     }
 
@@ -474,24 +718,24 @@ export function searchReferencesInPage(
 ): SearchResult[] {
   const lowerQuery = query.toLowerCase();
   const normalizedFramework = normalizePath(frameworkPath);
-  const frameworkUrlPrefix = `/documentation/${normalizedFramework}`;
   const results: SearchResult[] = [];
 
   for (const [, ref] of Object.entries(page.references ?? {})) {
     if (!ref.url || !ref.title) continue;
     if (ref.type !== "topic") continue;
-    if (!ref.url.toLowerCase().startsWith(frameworkUrlPrefix)) continue;
+    const path = pathFromDocUrl(ref.url);
+    if (!path) continue;
+    if (!(path === normalizedFramework || path.startsWith(`${normalizedFramework}/`))) continue;
 
     const titleMatch = ref.title.toLowerCase().includes(lowerQuery);
     const abstractText = extractText(ref.abstract, page.references);
     const abstractMatch = abstractText.toLowerCase().includes(lowerQuery);
 
     if (titleMatch || abstractMatch) {
-      const webBase = APPLE_DOCS_WEB_BASE.replace(/\/documentation$/, "");
       results.push({
         title: ref.title,
-        path: ref.url.replace(/^\/documentation\//, ""),
-        webUrl: `${webBase}${ref.url}`,
+        path,
+        webUrl: buildWebUrl(path),
         abstract: abstractText,
         kind: ref.kind ?? "unknown",
         role: ref.role ?? "unknown",
@@ -502,13 +746,33 @@ export function searchReferencesInPage(
   return results;
 }
 
+function searchResultScore(result: SearchResult, lowerQuery: string): number {
+  const lowerTitle = result.title.toLowerCase();
+  // Exact title match gets highest priority
+  if (lowerTitle === lowerQuery) return 0;
+  // Title starts with query
+  if (lowerTitle.startsWith(lowerQuery)) return 1;
+  // Title contains query at a word/symbol boundary (\\b doesn't work well with Swift
+  // symbols like "map(_:)" since parens aren't word characters — use lookahead for
+  // start-of-string or non-alphanumeric preceding character instead)
+  const escaped = lowerQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`(?:^|[^a-zA-Z0-9_])${escaped}`, "i").test(result.title)) return 2;
+  // Title contains query anywhere
+  if (lowerTitle.includes(lowerQuery)) return 3;
+  // Abstract match only
+  return 4;
+}
+
 function sortSearchResults(results: SearchResult[], query: string): SearchResult[] {
   const lowerQuery = query.toLowerCase();
   return results.sort((a, b) => {
-    const aTitle = a.title.toLowerCase().includes(lowerQuery);
-    const bTitle = b.title.toLowerCase().includes(lowerQuery);
-    if (aTitle && !bTitle) return -1;
-    if (!aTitle && bTitle) return 1;
+    const aScore = searchResultScore(a, lowerQuery);
+    const bScore = searchResultScore(b, lowerQuery);
+    if (aScore !== bScore) return aScore - bScore;
+    // Prefer shorter paths (closer to framework root = more important)
+    const aDepth = a.path.split("/").length;
+    const bDepth = b.path.split("/").length;
+    if (aDepth !== bDepth) return aDepth - bDepth;
     return a.title.localeCompare(b.title);
   });
 }
@@ -519,33 +783,42 @@ function sortSearchResults(results: SearchResult[], query: string): SearchResult
 
 export function extractText(
   content: AppleDocInlineContent[] | undefined,
-  references?: Record<string, AppleDocReference>
+  references?: Record<string, AppleDocReference>,
+  depth = 0
 ): string {
-  if (!content) return "";
+  if (!content || depth > MAX_RECURSION_DEPTH) return "";
   return content
     .map((item) => {
       if (item.type === "text") return item.text ?? "";
       if (item.type === "codeVoice") return `\`${item.code ?? ""}\``;
       if (item.type === "emphasis") {
-        // RED-209: Avoid empty emphasis artifacts
-        const inner = extractText(item.inlineContent as AppleDocInlineContent[] | undefined, references);
+        const inner = extractText(item.inlineContent as AppleDocInlineContent[] | undefined, references, depth + 1);
         return inner ? `*${inner}*` : "";
       }
       if (item.type === "strong") {
-        // RED-209: Avoid empty strong artifacts
-        const inner = extractText(item.inlineContent as AppleDocInlineContent[] | undefined, references);
+        const inner = extractText(item.inlineContent as AppleDocInlineContent[] | undefined, references, depth + 1);
         return inner ? `**${inner}**` : "";
+      }
+      if (item.type === "strikethrough") {
+        const inner = extractText(item.inlineContent as AppleDocInlineContent[] | undefined, references, depth + 1);
+        return inner ? `~~${inner}~~` : "";
+      }
+      if (item.type === "subscript") {
+        const inner = extractText(item.inlineContent as AppleDocInlineContent[] | undefined, references, depth + 1);
+        return inner ? `<sub>${inner}</sub>` : "";
+      }
+      if (item.type === "superscript") {
+        const inner = extractText(item.inlineContent as AppleDocInlineContent[] | undefined, references, depth + 1);
+        return inner ? `<sup>${inner}</sup>` : "";
       }
       if (item.type === "newTerm") return `*${item.text ?? ""}*`;
       if (item.type === "link") {
-        // RED-210: Render links with URL when both title and destination exist
         if (item.title && item.destination) return `[${item.title}](${item.destination})`;
         return item.destination ?? item.title ?? "";
       }
       if (item.type === "image") {
-        // RED-204: Handle image inline content
         const imgId = item.identifier ?? "";
-        if (references && imgId && references[imgId]) {
+        if (references && imgId && Object.prototype.hasOwnProperty.call(references, imgId)) {
           const imgRef = references[imgId];
           const alt = imgRef.alt ?? "Image";
           const variants = imgRef.variants;
@@ -555,16 +828,18 @@ export function extractText(
         return "[Image]";
       }
       if (item.type === "reference") {
-        // RED-004: Resolve doc:// URIs to human-readable titles
         const id = item.identifier ?? "";
-        if (references && references[id]?.title) {
+        if (references && Object.prototype.hasOwnProperty.call(references, id) && references[id]?.title) {
           return references[id].title!;
         }
-        // Fallback: extract last path component from doc:// URI
         const lastSegment = id.split("/").pop();
         return lastSegment ?? id;
       }
-      return "";
+      // Fallback: try to extract text from inlineContent for unknown types
+      if (item.inlineContent) {
+        return extractText(item.inlineContent as AppleDocInlineContent[] | undefined, references, depth + 1);
+      }
+      return item.text ?? "";
     })
     .join("")
     .trim();
@@ -602,10 +877,13 @@ export function extractOverview(
 
   const lines: string[] = [];
 
-  function processItems(items: AppleDocContentItem[], targetLines: string[]): void {
+  function processItems(items: AppleDocContentItem[], targetLines: string[], depth = 0): void {
+    if (depth > MAX_RECURSION_DEPTH) return;
+    if (!items || !Array.isArray(items)) return;
+
     for (const item of items) {
       if (item.type === "heading") {
-        const level = item.level ?? 2;
+        const level = Math.max(1, Math.min(6, item.level ?? 2));
         const headingText = item.text ?? extractText(item.inlineContent, references) ?? "";
         if (headingText) {
           targetLines.push(`${"#".repeat(level)} ${headingText}\n`);
@@ -618,13 +896,11 @@ export function extractOverview(
         const codeLines = (item.code ?? []).join("\n");
         targetLines.push(`\`\`\`${syntax}\n${codeLines}\n\`\`\`\n`);
       } else if (item.type === "aside") {
-        // RED-002 + RED-207: Fix aside handling - combine style with content in blockquote
         const style = item.style ? `**[${item.style.toUpperCase()}]** ` : "";
         if (item.content) {
           const innerLines: string[] = [];
-          processItems(item.content, innerLines);
+          processItems(item.content, innerLines, depth + 1);
           if (innerLines.length) {
-            // Prepend the style tag to the first inner line
             const combined = innerLines.map((l, i) => {
               const prefix = i === 0 ? style : "";
               return `> ${prefix}${l}`;
@@ -633,26 +909,26 @@ export function extractOverview(
           }
         }
       } else if (item.type === "table") {
-        // RED-206: Handle table content type
-        const tableData = item as unknown as {
-          header?: string;
-          rows?: Array<{ cells: Array<{ content: AppleDocContentItem[] }> }>;
-        };
-        if (tableData.rows && tableData.rows.length > 0) {
+        if (item.rows && Array.isArray(item.rows) && item.rows.length > 0) {
           const renderedRows: string[][] = [];
-          for (const row of tableData.rows) {
+          for (const row of item.rows) {
+            if (!row?.cells || !Array.isArray(row.cells)) continue;
             const cells: string[] = [];
             for (const cell of row.cells) {
-              const cellLines: string[] = [];
-              processItems(cell.content, cellLines);
-              cells.push(cellLines.map((l) => l.replace(/\n$/, "")).join(" "));
+              if (cell.content) {
+                const cellLines: string[] = [];
+                processItems(cell.content, cellLines, depth + 1);
+                cells.push(cellLines.map((l) => l.replace(/\n$/, "")).join(" "));
+              } else {
+                cells.push("");
+              }
             }
             renderedRows.push(cells);
           }
-          // Determine column count
-          const colCount = Math.max(...renderedRows.map((r) => r.length));
-          if (tableData.header === "row" && renderedRows.length > 0) {
+          const colCount = renderedRows.reduce((max, r) => Math.max(max, r.length), 1);
+          if (item.header === "row" && renderedRows.length > 0) {
             const headerRow = renderedRows[0].map((cell) => markdownTableCell(cell || " "));
+            while (headerRow.length < colCount) headerRow.push(" ");
             targetLines.push(`| ${headerRow.join(" | ")} |\n`);
             targetLines.push(`| ${Array(colCount).fill("---").join(" | ")} |\n`);
             for (const row of renderedRows.slice(1)) {
@@ -660,7 +936,6 @@ export function extractOverview(
               targetLines.push(`| ${row.map((cell) => markdownTableCell(cell)).join(" | ")} |\n`);
             }
           } else {
-            // No header row: generate a blank header for valid markdown
             targetLines.push(`| ${Array(colCount).fill(" ").join(" | ")} |\n`);
             targetLines.push(`| ${Array(colCount).fill("---").join(" | ")} |\n`);
             for (const row of renderedRows) {
@@ -671,7 +946,6 @@ export function extractOverview(
           targetLines.push("\n");
         }
       } else if (item.type === "termList") {
-        // RED-205: Handle termList content type
         const terms = (item.items ?? []) as Array<{
           term?: { inlineContent?: AppleDocInlineContent[] };
           definition?: { content?: AppleDocContentItem[] };
@@ -683,7 +957,7 @@ export function extractOverview(
           }
           if (entry.definition?.content) {
             const defLines: string[] = [];
-            processItems(entry.definition.content as AppleDocContentItem[], defLines);
+            processItems(entry.definition.content as AppleDocContentItem[], defLines, depth + 1);
             for (const dl of defLines) {
               targetLines.push(dl);
             }
@@ -691,17 +965,44 @@ export function extractOverview(
           targetLines.push("\n");
         }
       } else if (item.type === "unorderedList" || item.type === "orderedList") {
-        // RED-010: Handle list items
         const listItems = (item.items ?? []) as AppleDocContentItem[];
         listItems.forEach((listItem, index) => {
           const bullet = item.type === "orderedList" ? `${index + 1}. ` : "- ";
           if (listItem.content) {
             const innerLines: string[] = [];
-            processItems(listItem.content as AppleDocContentItem[], innerLines);
+            processItems(listItem.content as AppleDocContentItem[], innerLines, depth + 1);
             const text = innerLines.map((l) => l.replace(/\n$/, "")).join(" ");
             if (text) targetLines.push(`${bullet}${text}\n`);
           }
         });
+      } else if (item.type === "links") {
+        // Handle links blocks (curated link lists)
+        const linkItems = item.items;
+        if (linkItems && Array.isArray(linkItems) && references) {
+          for (const rawLinkId of linkItems) {
+            if (typeof rawLinkId !== "string") continue;
+            const linkId = rawLinkId;
+            if (Object.prototype.hasOwnProperty.call(references, linkId)) {
+              const linkRef = references[linkId];
+              const title = linkRef.title ?? linkId.split("/").pop() ?? linkId;
+              const abstract = extractText(linkRef.abstract, references);
+              const suffix = abstract ? ` — ${abstract}` : "";
+              targetLines.push(`- **${title}**${suffix}\n`);
+            }
+          }
+        }
+      } else if (item.type === "row" || item.type === "tabNavigator") {
+        // Layout containers: recurse into any nested content
+        if (item.content) {
+          processItems(item.content as AppleDocContentItem[], targetLines, depth + 1);
+        }
+        if (item.items && Array.isArray(item.items)) {
+          for (const child of item.items) {
+            if (child && typeof child === "object" && "content" in child) {
+              processItems((child as { content: AppleDocContentItem[] }).content, targetLines, depth + 1);
+            }
+          }
+        }
       }
     }
   }
@@ -716,20 +1017,100 @@ export function extractOverview(
   return lines.join("\n").trim();
 }
 
+export function extractParameters(
+  sections: AppleDocPage["primaryContentSections"],
+  references?: Record<string, AppleDocReference>
+): Array<{ name: string; description: string }> | undefined {
+  if (!sections) return undefined;
+
+  const paramSection = sections.find((s) => s.kind === "parameters");
+  if (!paramSection?.parameters?.length) return undefined;
+
+  const params = paramSection.parameters
+    .map((p: AppleDocParameter) => ({
+      name: p.name,
+      description: (p.content ?? [])
+        .filter((item) => item.type === "paragraph" && item.inlineContent)
+        .map((item) => extractText(item.inlineContent, references))
+        .filter(Boolean)
+        .join(" "),
+    }))
+    .filter((p) => p.name);
+
+  return params.length > 0 ? params : undefined;
+}
+
+function extractBreadcrumb(
+  hierarchy: AppleDocPage["hierarchy"],
+  references?: Record<string, AppleDocReference>
+): string[] | undefined {
+  if (!hierarchy?.paths?.length) return undefined;
+  const path = hierarchy.paths[0];
+  if (!path?.length) return undefined;
+
+  const crumbs = path
+    .map((id) => {
+      if (!references || !Object.prototype.hasOwnProperty.call(references, id)) {
+        return id.split("/").pop() ?? id;
+      }
+      return references[id].title ?? id.split("/").pop() ?? id;
+    })
+    .filter((c) => c && c !== "Technologies");
+
+  return crumbs.length > 0 ? crumbs : undefined;
+}
+
+function extractDeprecationInfo(metadata: AppleDocPage["metadata"]): {
+  deprecated: boolean;
+  deprecatedAt?: string;
+  deprecationMessage?: string;
+} {
+  const plats = metadata?.platforms ?? [];
+  const deprecatedPlatforms = plats.filter((p) => p.deprecated || p.deprecatedAt);
+  if (deprecatedPlatforms.length === 0) return { deprecated: false };
+
+  // If all platforms are deprecated, mark the whole symbol as deprecated
+  const allDeprecated = plats.length > 0 && deprecatedPlatforms.length === plats.length;
+
+  // Find the earliest deprecation version for display
+  const deprecatedAt = deprecatedPlatforms
+    .filter((p) => p.deprecatedAt)
+    .map((p) => `${p.name} ${p.deprecatedAt}`)
+    .join(", ");
+
+  // Extract deprecation message or renamed info if available
+  const messageEntries = deprecatedPlatforms
+    .filter((p) => p.message || p.renamed)
+    .map((p) => p.renamed ? `Use ${p.renamed} instead.` : p.message!);
+  // Dedupe messages (often the same across platforms)
+  const uniqueMessages = [...new Set(messageEntries)];
+  const deprecationMessage = uniqueMessages.length > 0 ? uniqueMessages.join(" ") : undefined;
+
+  return {
+    deprecated: allDeprecated,
+    deprecatedAt: deprecatedAt || undefined,
+    deprecationMessage,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Parsers for specific response shapes
 // ---------------------------------------------------------------------------
 
 export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
   const meta = page.metadata ?? {};
-  const title = meta.title ?? page.identifier?.url ?? path;
+  const title = meta.title || page.identifier?.url || path;
   const kind = page.kind ?? "unknown";
   const role = meta.role ?? "unknown";
+  const canonicalPath = pathFromDocUrl(page.identifier?.url) ?? normalizePath(path);
 
   const refs = page.references;
   const abstract = extractText(page.abstract, refs);
   const declaration = extractDeclaration(page.primaryContentSections);
   const overview = extractOverview(page.primaryContentSections, refs);
+  const parameters = extractParameters(page.primaryContentSections, refs);
+  const breadcrumb = extractBreadcrumb(page.hierarchy, refs);
+  const deprecation = extractDeprecationInfo(meta);
 
   const platforms = meta.platforms ?? [];
 
@@ -743,33 +1124,42 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
   const relationships = (page.relationshipsSections ?? []).map((section) => ({
     title: section.title,
     type: section.type,
-    items: section.identifiers.map((id) => {
-      const ref = page.references?.[id];
+    items: (section.identifiers ?? []).map((id) => {
+      const ref = page.references && Object.prototype.hasOwnProperty.call(page.references, id) ? page.references[id] : undefined;
+      const refPath = pathFromDocUrl(ref?.url);
       return {
         title: ref?.title ?? id,
-        url: ref?.url ?? "",
+        path: refPath ?? (ref?.url ?? ""),
       };
     }),
   }));
 
-  // RED-219: Parse seeAlsoSections
+  // Parse seeAlsoSections
   const seeAlsoSections = (page.seeAlsoSections ?? []).map((section) => ({
     title: section.title,
     items: resolveReferenceItems(section.identifiers, refs),
   }));
 
-  // RED-005 + REFACTOR SHOULD-FIX-1: Use normalizePath as single source of truth
-  const normalizedPath = normalizePath(path);
-  const webUrl = `${APPLE_DOCS_WEB_BASE}/${normalizedPath}`;
+  const webUrl = buildWebUrl(canonicalPath);
+
+  const moduleName = meta.modules?.[0]?.name;
 
   return {
     title,
     kind,
     role,
+    roleHeading: meta.roleHeading || undefined,
+    symbolKind: meta.symbolKind || undefined,
+    module: moduleName || undefined,
     abstract,
     declaration: declaration || undefined,
+    parameters,
     platforms,
-    path: normalizedPath,
+    deprecated: deprecation.deprecated || undefined,
+    deprecatedAt: deprecation.deprecatedAt || undefined,
+    deprecationMessage: deprecation.deprecationMessage || undefined,
+    breadcrumb,
+    path: canonicalPath,
     webUrl,
     topicSections,
     relationships,
@@ -781,9 +1171,6 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
 export function parseTechnologies(page: AppleDocPage): ParsedTechnologies {
   const sections: ParsedTechnologies["sections"] = [];
 
-  // RED-001 + REFACTOR SHOULD-FIX-4: Use properly typed AppleDocSection
-  // The /technologies endpoint uses `page.sections` (not `topicSections`).
-  // Fall back to topicSections for regular pages.
   const pageSections: AppleDocSection[] | undefined = page.sections;
 
   if (pageSections && pageSections.length > 0) {
@@ -814,12 +1201,12 @@ export function parseTechnologies(page: AppleDocPage): ParsedTechnologies {
     for (const section of page.topicSections ?? []) {
       const techs = section.identifiers
         .map((id) => {
-          const ref = page.references?.[id];
+          const ref = page.references && Object.prototype.hasOwnProperty.call(page.references, id) ? page.references[id] : undefined;
           if (!ref) return null;
           return {
             title: ref.title ?? id,
-            url: ref.url ?? "",
-            abstract: extractText(ref.abstract),
+            url: ref.url ? normalizeDocUrl(ref.url) : "",
+            abstract: extractText(ref.abstract, page.references),
             role: ref.role ?? "collection",
           };
         })
@@ -844,15 +1231,10 @@ export async function searchFramework(
   limit: number
 ): Promise<SearchResult[]> {
   const page = await fetchDocPage(frameworkPath);
-  const seedPaths = new Set<string>([
-    ...collectDirectMatchPaths(page, frameworkPath, query),
-    ...collectSearchPagePaths(page, frameworkPath),
-  ]);
-  const childPages = await Promise.allSettled(Array.from(seedPaths).map((path) => fetchDocPage(path)));
 
   const merged = new Map<string, SearchResult>();
   const rootPageMatch = createSearchResultFromPage(page, frameworkPath);
-  if (rootPageMatch && matchesQuery(query, rootPageMatch.title, rootPageMatch.path, rootPageMatch.abstract)) {
+  if (rootPageMatch && matchesQuery(query, rootPageMatch.title, rootPageMatch.path, rootPageMatch.abstract, searchTextForPage(page))) {
     merged.set(rootPageMatch.path.toLowerCase(), rootPageMatch);
   }
 
@@ -860,8 +1242,44 @@ export async function searchFramework(
     merged.set(result.path.toLowerCase(), result);
   }
 
+  // Fast path: if root page references already yield enough results, skip child-page fetches
+  const directResults = dedupeSearchResults(Array.from(merged.values()));
+  if (directResults.length >= limit) {
+    return sortSearchResults(directResults, query).slice(0, limit);
+  }
+
+  // Collect seed paths from direct matches, child collection pages, and topic section identifiers
+  const normalizedFramework = normalizePath(frameworkPath);
+  const seedPaths = new Set<string>([
+    ...collectDirectMatchPaths(page, frameworkPath, query),
+    ...collectSearchPagePaths(page, frameworkPath),
+  ]);
+  // Also add paths from topicSections identifiers resolved via references
+  for (const section of page.topicSections ?? []) {
+    for (const id of section.identifiers) {
+      const ref = page.references && Object.prototype.hasOwnProperty.call(page.references, id) ? page.references[id] : undefined;
+      if (!ref?.url) continue;
+      const refPath = pathFromDocUrl(ref.url);
+      if (!refPath) continue;
+      if (!(refPath === normalizedFramework || refPath.startsWith(`${normalizedFramework}/`))) continue;
+      if (refPath !== normalizedFramework) seedPaths.add(refPath);
+    }
+  }
+
+  // Use rawFetchDocPage in search to avoid 404 resolution doubling requests
+  const childPages = await mapWithConcurrency(
+    Array.from(seedPaths),
+    SEARCH_CONCURRENCY_LIMIT,
+    (p) => rawFetchDocPage(p.toLowerCase())
+  );
+
+  // Track fetch failures to surface partial errors
+  let failedFetches = 0;
   for (const childPage of childPages) {
-    if (childPage.status !== "fulfilled") continue;
+    if (childPage.status !== "fulfilled") {
+      failedFetches++;
+      continue;
+    }
     const pageResult = createSearchResultFromPage(childPage.value, frameworkPath);
     if (pageResult && matchesQuery(query, pageResult.title, pageResult.path, pageResult.abstract, searchTextForPage(childPage.value))) {
       merged.set(pageResult.path.toLowerCase(), pageResult);
@@ -871,7 +1289,24 @@ export async function searchFramework(
     }
   }
 
-  return sortSearchResults(dedupeSearchResults(Array.from(merged.values())), query).slice(0, limit);
+  // If a significant portion of fetches failed, inject a warning as metadata
+  // Reserve one slot for the warning so we don't exceed the caller's limit
+  const hasWarning = failedFetches > 0 && failedFetches >= seedPaths.size * 0.5;
+  const resultLimit = hasWarning ? Math.max(limit - 1, 0) : limit;
+  const results = sortSearchResults(dedupeSearchResults(Array.from(merged.values())), query).slice(0, resultLimit);
+
+  if (hasWarning) {
+    results.unshift({
+      title: "⚠ Partial results",
+      path: "",
+      webUrl: "",
+      abstract: `${failedFetches} of ${seedPaths.size} sub-page fetches failed. Results may be incomplete — try again if needed.`,
+      kind: "warning",
+      role: "warning",
+    });
+  }
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -881,13 +1316,41 @@ export async function searchFramework(
 export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
   const lines: string[] = [];
 
+  // Deprecation banner at top
+  if (parsed.deprecated) {
+    let banner = `> **DEPRECATED**${parsed.deprecatedAt ? ` (${parsed.deprecatedAt})` : ""}`;
+    if (parsed.deprecationMessage) banner += `\n> ${parsed.deprecationMessage}`;
+    lines.push(banner);
+    lines.push("");
+  }
+
   lines.push(`# ${parsed.title}`);
-  lines.push(`**Kind**: ${parsed.kind} | **Role**: ${parsed.role}`);
+
+  // Metadata line with role heading, module, kind
+  const metaParts: string[] = [];
+  if (parsed.roleHeading) metaParts.push(parsed.roleHeading);
+  else metaParts.push(`${parsed.kind} (${parsed.role})`);
+  if (parsed.module) metaParts.push(`Module: ${parsed.module}`);
+  lines.push(`**${metaParts.join(" | ")}**`);
+
+  // Breadcrumb
+  if (parsed.breadcrumb?.length) {
+    lines.push(`**Path**: ${parsed.breadcrumb.join(" > ")} > ${parsed.title}`);
+  }
+
   lines.push(`**URL**: ${parsed.webUrl}`);
 
   if (parsed.platforms.length > 0) {
     const platformStr = parsed.platforms
-      .map((p) => `${p.name}${p.introducedAt ? ` ${p.introducedAt}+` : ""}${p.beta ? " (beta)" : ""}`)
+      .map((p) => {
+        let s = p.name;
+        if (p.introducedAt) s += ` ${p.introducedAt}+`;
+        if (p.deprecatedAt) s += ` (deprecated ${p.deprecatedAt})`;
+        else if (p.deprecated) s += ` (deprecated)`;
+        if (p.renamed) s += ` → ${p.renamed}`;
+        if (p.beta) s += ` (beta)`;
+        return s;
+      })
       .join(", ");
     lines.push(`**Platforms**: ${platformStr}`);
   }
@@ -908,6 +1371,16 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
     lines.push("");
   }
 
+  // Parameters section
+  if (parsed.parameters?.length) {
+    lines.push(`## Parameters`);
+    for (const param of parsed.parameters) {
+      const desc = param.description ? ` — ${param.description}` : "";
+      lines.push(`- **\`${param.name}\`**${desc}`);
+    }
+    lines.push("");
+  }
+
   if (parsed.overview) {
     lines.push(`## Documentation`);
     lines.push(parsed.overview);
@@ -921,7 +1394,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
       lines.push(`\n### ${section.title}`);
       for (const item of section.items.slice(0, 20)) {
         const abstract = item.abstract ? ` — ${item.abstract}` : "";
-        lines.push(`- **${item.title}** (\`${item.url}\`)${abstract}`);
+        lines.push(`- **${item.title}** (path: \`${item.path}\`)${abstract}`);
       }
       if (section.items.length > 20) {
         lines.push(`- *(${section.items.length - 20} more items...)*`);
@@ -935,7 +1408,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
     for (const rel of parsed.relationships) {
       lines.push(`\n### ${rel.title}`);
       for (const item of rel.items.slice(0, 15)) {
-        lines.push(`- ${item.title} (\`${item.url}\`)`);
+        lines.push(`- ${item.title} (path: \`${item.path}\`)`);
       }
       if (rel.items.length > 15) {
         lines.push(`- *(${rel.items.length - 15} more...)*`);
@@ -944,7 +1417,6 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
     lines.push("");
   }
 
-  // RED-219: Render See Also sections
   if (parsed.seeAlsoSections.length > 0) {
     lines.push(`## See Also`);
     for (const section of parsed.seeAlsoSections) {
@@ -952,7 +1424,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
       lines.push(`\n### ${section.title}`);
       for (const item of section.items.slice(0, 20)) {
         const abstract = item.abstract ? ` — ${item.abstract}` : "";
-        lines.push(`- **${item.title}** (\`${item.url}\`)${abstract}`);
+        lines.push(`- **${item.title}** (path: \`${item.path}\`)${abstract}`);
       }
       if (section.items.length > 20) {
         lines.push(`- *(${section.items.length - 20} more items...)*`);
@@ -970,7 +1442,6 @@ export function formatTechnologiesMarkdown(parsed: ParsedTechnologies): string {
     lines.push("");
     for (const tech of section.technologies) {
       const abstract = tech.abstract ? ` — ${tech.abstract}` : "";
-      // Extract path from url like /documentation/swiftui -> swiftui
       const path = tech.url.replace(/^\/documentation\//, "");
       lines.push(`- **${tech.title}** (\`${path}\`)${abstract}`);
     }

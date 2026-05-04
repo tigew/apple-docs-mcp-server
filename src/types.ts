@@ -14,6 +14,8 @@ export interface AppleDocPlatform {
   beta?: boolean;
   unavailable?: boolean;
   deprecated?: boolean;
+  message?: string;
+  renamed?: string;
 }
 
 export interface AppleDocFragment {
@@ -45,12 +47,21 @@ export interface AppleDocContentItem {
   style?: string;
   content?: AppleDocContentItem[];
   items?: unknown[];
+  // Table fields (avoids unsafe `as unknown as` casts)
+  header?: string;
+  rows?: Array<{ cells: Array<{ content?: AppleDocContentItem[] }> }>;
+}
+
+export interface AppleDocParameter {
+  name: string;
+  content?: AppleDocContentItem[];
 }
 
 export interface AppleDocPrimaryContentSection {
   kind: string;
   content?: AppleDocContentItem[];
   declarations?: AppleDocDeclaration[];
+  parameters?: AppleDocParameter[];
 }
 
 export interface AppleDocDeclaration {
@@ -117,7 +128,6 @@ export interface AppleDocHierarchy {
   paths: string[][];
 }
 
-// REFACTOR SHOULD-FIX-4: Proper type for page sections (used in /technologies endpoint)
 export interface AppleDocSection {
   kind?: string;
   title?: string;
@@ -143,15 +153,15 @@ export interface AppleDocGroup {
   technologies?: AppleDocTechnologyEntry[];
 }
 export interface AppleDocPage {
-  identifier: AppleDocIdentifier;
-  kind: string;
+  identifier?: AppleDocIdentifier;
+  kind?: string;
   abstract?: AppleDocInlineContent[];
-  metadata: AppleDocMetadata;
+  metadata?: AppleDocMetadata;
   primaryContentSections?: AppleDocPrimaryContentSection[];
   topicSections?: AppleDocTopicSection[];
   seeAlsoSections?: AppleDocTopicSection[];
   relationshipsSections?: AppleDocRelationshipsSection[];
-  references: Record<string, AppleDocReference>;
+  references?: Record<string, AppleDocReference>;
   hierarchy?: AppleDocHierarchy;
   variants?: Array<{ traits: Array<{ interfaceLanguage: string }>; paths: string[] }>;
   sections?: AppleDocSection[];
@@ -162,16 +172,24 @@ export interface ParsedSymbol {
   title: string;
   kind: string;
   role: string;
+  roleHeading?: string;
+  symbolKind?: string;
+  module?: string;
   abstract: string;
   declaration?: string;
+  parameters?: Array<{ name: string; description: string }>;
   platforms: AppleDocPlatform[];
+  deprecated?: boolean;
+  deprecatedAt?: string;
+  deprecationMessage?: string;
+  breadcrumb?: string[];
   path: string;
   webUrl: string;
   topicSections: Array<{
     title: string;
     items: Array<{
       title: string;
-      url: string;
+      path: string;
       abstract: string;
       kind: string;
       role: string;
@@ -180,13 +198,13 @@ export interface ParsedSymbol {
   relationships: Array<{
     title: string;
     type: string;
-    items: Array<{ title: string; url: string }>;
+    items: Array<{ title: string; path: string }>;
   }>;
   seeAlsoSections: Array<{
     title: string;
     items: Array<{
       title: string;
-      url: string;
+      path: string;
       abstract: string;
       kind: string;
       role: string;

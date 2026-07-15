@@ -530,10 +530,16 @@ async function main(): Promise<void> {
   console.error("Apple Developer Documentation MCP server running via stdio");
 }
 
-// Graceful shutdown
-function shutdown(): void {
+// Graceful shutdown — bounded by a timeout so a hung close() can't block
+// SIGINT/SIGTERM from ever actually terminating the process.
+const SHUTDOWN_TIMEOUT_MS = 2000;
+
+async function shutdown(): Promise<void> {
   console.error("Shutting down MCP server...");
-  server.close().catch(() => {});
+  await Promise.race([
+    server.close().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+  ]);
   process.exit(0);
 }
 

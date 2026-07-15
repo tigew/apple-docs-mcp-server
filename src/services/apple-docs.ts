@@ -131,22 +131,9 @@ function setCachedPage(normalizedPath: string, page: AppleDocPage): void {
 function stripDocPrefix(url: string): string {
   return url
     .replace(/^doc:\/\/[^/]*\/documentation\//i, "")
-    .replace(/^https?:\/\/developer\.apple\.com/i, "")
+    .replace(/^https?:\/\/developer\.apple\.com(?=\/|$)/i, "")
     .replace(/^\/+documentation\//i, "")
     .replace(/^documentation\//i, "");
-}
-
-function extractPathFromDocUrl(url: string): string {
-  // Use pathFromDocUrl which handles doc://, https://, and /documentation/ prefixes
-  const resolved = pathFromDocUrl(url);
-  if (resolved) return resolved;
-  // Fallback: strip /documentation/ prefix and normalize
-  const raw = url.replace(/^\/documentation\//i, "").toLowerCase();
-  try {
-    return normalizePath(raw);
-  } catch {
-    return raw;
-  }
 }
 
 function buildWebUrl(path: string): string {
@@ -195,7 +182,7 @@ function pathFromDocUrl(url: string | undefined): string | null {
     }
   }
 
-  if (/^https?:\/\//i.test(url) && !/^https?:\/\/developer\.apple\.com/i.test(url)) return null;
+  if (/^https?:\/\//i.test(url) && !/^https?:\/\/developer\.apple\.com(\/|$)/i.test(url)) return null;
 
   const withoutPrefix = stripDocPrefix(url);
   if (!withoutPrefix) return null;

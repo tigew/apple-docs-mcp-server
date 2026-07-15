@@ -356,7 +356,7 @@ server.registerTool(
     title: "Search Apple Documentation",
     description: `Search for symbols, articles, and topics within an Apple framework's documentation.
 
-Performs a text search through all references on the framework's documentation page, matching against symbol names and descriptions. This is useful for discovering APIs when you know the framework but not the exact symbol name.
+Matches against the framework's complete symbol tree — every type, enum case, extension member, and nested member, not just what's listed on the framework's own root page — plus its curated root-page references and descriptions. Multi-word queries match if any query word appears in a symbol's name or path, ranked by how many words matched (so "deferred start capture session" finds AVCaptureSession's deferred-start members even though "capture session" only appears in the path). Because the search is complete, an empty result is good evidence the symbol doesn't exist under that name — not just that it wasn't indexed. This is useful for discovering APIs when you know the framework but not the exact symbol name.
 
 Args:
   - framework_path (string): The framework to search in (e.g. "swiftui", "foundation", "uikit")
@@ -401,7 +401,7 @@ apple_docs_get_page directly (e.g. path="swiftui/animation").`,
         .string()
         .min(1, "Search query must not be empty")
         .max(200, "Search query too long")
-        .describe("Text to search for in symbol titles and descriptions"),
+        .describe("Text to search for in symbol titles, paths, and descriptions. Multi-word queries match any word (ranked by how many matched), not the literal phrase."),
       limit: z
         .number()
         .int()
@@ -426,14 +426,24 @@ apple_docs_get_page directly (e.g. path="swiftui/animation").`,
       const normalizedFrameworkPath = normalizePath(framework_path);
       const results = await searchFramework(normalizedFrameworkPath, query, limit);
 
+      const realResultCount = results.filter((r) => r.kind !== "warning").length;
+      const searchWarning = results.find((r) => r.kind === "warning");
+
       let text: string;
       if (response_format === ResponseFormat.JSON) {
         text = clampJsonResponse(
           {
             query,
             framework: normalizedFrameworkPath,
-            count: results.length,
-            results,
+            count: realResultCount,
+            ...(searchWarning
+              ? { note: searchWarning.abstract }
+              : realResultCount === 0
+                ? {
+                    note: "This search covers the framework's complete symbol tree, not just its root documentation page — an empty result is good evidence the symbol doesn't exist under this name in this framework.",
+                  }
+                : {}),
+            results: results.filter((r) => r.kind !== "warning"),
           },
           "Response truncated. Reduce limit or refine your query."
         );

@@ -10,6 +10,8 @@
 import axios, { AxiosError } from "axios";
 import {
   AppleDocGroup,
+  AppleDocIndexNode,
+  AppleDocIndexResponse,
   AppleDocPage,
   AppleDocSection,
   AppleDocTechnologyEntry,
@@ -28,101 +30,81 @@ import { APPLE_DOCS_BASE_URL, APPLE_DOCS_WEB_BASE, REQUEST_TIMEOUT_MS } from "..
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-const httpClient = axios.create({
-  timeout: REQUEST_TIMEOUT_MS,
-  maxContentLength: 10 * 1024 * 1024, // 10MB - RED-201
-  maxBodyLength: 10 * 1024 * 1024,    // 10MB - RED-201
-  maxRedirects: 3, // Limit redirects to prevent redirect-chain SSRF
-  headers: {
-    Accept: "application/json",
-    "User-Agent": "apple-docs-mcp-server/1.0",
-  },
-});
+function createDocsHttpClient(maxBytes: number) {
+  return axios.create({
+    timeout: REQUEST_TIMEOUT_MS,
+    maxContentLength: maxBytes, // RED-201
+    maxBodyLength: maxBytes,    // RED-201
+    maxRedirects: 3, // Limit redirects to prevent redirect-chain SSRF
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "apple-docs-mcp-server/1.0",
+    },
+  });
+}
 
-const SEARCH_CHILD_PAGE_LIMIT = 60;
-const SEARCH_DIRECT_MATCH_LIMIT = 12;
-const SEARCH_CONCURRENCY_LIMIT = 8;
+const httpClient = createDocsHttpClient(10 * 1024 * 1024); // 10MB — a single doc page
+
+// Framework navigator-index payloads are much larger than a single doc page
+// (Foundation's is ~6.6MB) — a dedicated client keeps that headroom off the
+// normal per-page fetch path.
+const indexHttpClient = createDocsHttpClient(20 * 1024 * 1024);
+
 const MAX_RECURSION_DEPTH = 40;
 
 // ---------------------------------------------------------------------------
-// Concurrency limiter for search fetches (BUG-1 fix)
+// Generic TTL + LRU cache (shared by the page cache and the framework-index
+// cache below — same eviction/expiry rules, different size/TTL per use)
 // ---------------------------------------------------------------------------
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T) => Promise<R>
-): Promise<PromiseSettledResult<R>[]> {
-  const results: PromiseSettledResult<R>[] = new Array(items.length);
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (nextIndex < items.length) {
-      const index = nextIndex++;
-      try {
-        results[index] = { status: "fulfilled", value: await fn(items[index]) };
-      } catch (reason) {
-        results[index] = { status: "rejected", reason };
-      }
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// Page cache (simple TTL to avoid redundant fetches)
-// ---------------------------------------------------------------------------
-
-const PAGE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const PAGE_CACHE_MAX_SIZE = 100;
-
-interface CachedPage {
-  page: AppleDocPage;
-  expiresAt: number;
-}
-
-const pageCache = new Map<string, CachedPage>();
-
-// Proactive cache cleanup: purge expired entries periodically to prevent
-// stale accumulation when entries are never re-accessed
 const CACHE_CLEANUP_INTERVAL_MS = 60 * 1000; // 1 minute
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of pageCache) {
-    if (now > entry.expiresAt) {
-      pageCache.delete(key);
+
+function createTtlCache<T>(ttlMs: number, maxSize: number) {
+  const store = new Map<string, { value: T; expiresAt: number }>();
+
+  // Proactive cleanup: purge expired entries periodically so they don't
+  // accumulate when a key is never re-accessed after expiring.
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of store) {
+      if (now > entry.expiresAt) store.delete(key);
     }
-  }
-}, CACHE_CLEANUP_INTERVAL_MS).unref(); // unref so it doesn't keep the process alive
+  }, CACHE_CLEANUP_INTERVAL_MS).unref(); // unref so it doesn't keep the process alive
 
-function getCachedPage(normalizedPath: string): AppleDocPage | undefined {
-  const entry = pageCache.get(normalizedPath);
-  if (!entry) return undefined;
-  if (Date.now() > entry.expiresAt) {
-    pageCache.delete(normalizedPath);
-    return undefined;
-  }
-  // LRU: move to end by re-inserting (Map preserves insertion order)
-  pageCache.delete(normalizedPath);
-  pageCache.set(normalizedPath, entry);
-  return entry.page;
+  return {
+    get(key: string): T | undefined {
+      const entry = store.get(key);
+      if (!entry) return undefined;
+      if (Date.now() > entry.expiresAt) {
+        store.delete(key);
+        return undefined;
+      }
+      // LRU: move to end by re-inserting (Map preserves insertion order)
+      store.delete(key);
+      store.set(key, entry);
+      return entry.value;
+    },
+    set(key: string, value: T): void {
+      if (store.has(key)) store.delete(key);
+      if (store.size >= maxSize) {
+        const firstKey = store.keys().next().value;
+        if (firstKey !== undefined) store.delete(firstKey);
+      }
+      store.set(key, { value, expiresAt: Date.now() + ttlMs });
+    },
+  };
 }
 
-function setCachedPage(normalizedPath: string, page: AppleDocPage): void {
-  // If already present, delete first so re-insert moves it to the end (LRU)
-  if (pageCache.has(normalizedPath)) {
-    pageCache.delete(normalizedPath);
-  }
-  // Evict least-recently-used (first entry) if at capacity
-  if (pageCache.size >= PAGE_CACHE_MAX_SIZE) {
-    const firstKey = pageCache.keys().next().value;
-    if (firstKey !== undefined) pageCache.delete(firstKey);
-  }
-  pageCache.set(normalizedPath, { page, expiresAt: Date.now() + PAGE_CACHE_TTL_MS });
-}
+const pageCache = createTtlCache<AppleDocPage>(5 * 60 * 1000, 100);
+const getCachedPage = (normalizedPath: string) => pageCache.get(normalizedPath);
+const setCachedPage = (normalizedPath: string, page: AppleDocPage) => pageCache.set(normalizedPath, page);
+
+// Framework navigator-index payloads are much larger (up to several MB) than
+// a single doc page, hence the longer TTL (they change less often) and much
+// smaller capacity.
+const indexCache = createTtlCache<AppleDocIndexNode[]>(15 * 60 * 1000, 15);
+const getCachedIndex = (topLevelFramework: string) => indexCache.get(topLevelFramework);
+const setCachedIndex = (topLevelFramework: string, nodes: AppleDocIndexNode[]) => indexCache.set(topLevelFramework, nodes);
 
 // ---------------------------------------------------------------------------
 // Path utilities (unified — fixes BUG-9 divergent stripping)
@@ -200,6 +182,72 @@ function normalizeDocUrl(url: string): string {
   return `/documentation/${internalPath}`;
 }
 
+// ---------------------------------------------------------------------------
+// Framework navigator index — the full recursive symbol tree that powers the
+// docs-site sidebar, fetched from a separate (undocumented) endpoint. One
+// fetch per top-level framework gives complete recall, including enum cases,
+// extension members, and deeply nested type members that never appear on a
+// framework's own root documentation page.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch and cache the full symbol-tree index for a top-level framework
+ * (e.g. "avfoundation"). Throws on network/format errors — callers should
+ * treat this as a best-effort search tier and fall back gracefully.
+ */
+async function fetchFrameworkIndex(topLevelFramework: string): Promise<AppleDocIndexNode[]> {
+  const cached = getCachedIndex(topLevelFramework);
+  if (cached) return cached;
+
+  const url = `${APPLE_DOCS_BASE_URL}/index/${topLevelFramework}.json`;
+  const response = await indexHttpClient.get<AppleDocIndexResponse>(url);
+  const data = response.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(`Unexpected response format for framework index "${topLevelFramework}".`);
+  }
+
+  const languages = data.interfaceLanguages ?? {};
+  const swiftNodes = Array.isArray(languages.swift) ? languages.swift : [];
+  const occNodes = Array.isArray(languages.occ) ? languages.occ : [];
+  const nodes = swiftNodes.length ? swiftNodes : occNodes;
+
+  setCachedIndex(topLevelFramework, nodes);
+  return nodes;
+}
+
+interface FlattenedIndexSymbol {
+  title: string;
+  path: string;
+  type: string;
+}
+
+/**
+ * Flatten the recursive index tree into a list of navigable symbols. Skips
+ * group markers (no path — they're just section headers) and external links.
+ */
+export function flattenFrameworkIndexNodes(nodes: AppleDocIndexNode[]): FlattenedIndexSymbol[] {
+  const out: FlattenedIndexSymbol[] = [];
+
+  function walk(node: AppleDocIndexNode, depth: number): void {
+    if (depth > MAX_RECURSION_DEPTH) return;
+    if (!node.external && node.path) {
+      const normalizedPath = pathFromDocUrl(node.path);
+      if (normalizedPath) {
+        out.push({ title: node.title ?? normalizedPath, path: normalizedPath, type: node.type ?? "unknown" });
+      }
+    }
+    for (const child of node.children ?? []) {
+      walk(child, depth + 1);
+    }
+  }
+
+  for (const node of nodes) {
+    walk(node, 0);
+  }
+
+  return out;
+}
+
 function searchTextForPage(page: AppleDocPage): string {
   return [
     page.metadata?.title,
@@ -212,10 +260,19 @@ function searchTextForPage(page: AppleDocPage): string {
     .toLowerCase();
 }
 
+function splitQueryTerms(query: string): string[] {
+  return query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+// Multi-word queries are OR-matched term-by-term against the combined haystack
+// (never AND — requiring every term to hit the same field is what made
+// multi-word queries perform *worse* than single-word ones) and ranked by how
+// many terms matched via sortSearchResults below.
 function matchesQuery(query: string, ...values: Array<string | undefined>): boolean {
-  const lowerQuery = query.trim().toLowerCase();
-  if (!lowerQuery) return false;
-  return values.some((value) => value?.toLowerCase().includes(lowerQuery));
+  const terms = splitQueryTerms(query);
+  if (terms.length === 0) return false;
+  const haystack = values.filter(Boolean).join(" ").toLowerCase();
+  return terms.some((term) => haystack.includes(term));
 }
 
 function queryToLikelySlug(query: string): string {
@@ -228,12 +285,16 @@ function queryToLikelySlug(query: string): string {
     .replace(/^-|-$/g, "");
 }
 
+function isInFrameworkScope(path: string, normalizedFramework: string): boolean {
+  return path === normalizedFramework || path.startsWith(`${normalizedFramework}/`);
+}
+
 function createSearchResultFromPage(page: AppleDocPage, frameworkPath: string): SearchResult | null {
   const path = pathFromDocUrl(page.identifier?.url);
   if (!path) return null;
 
   const normalizedFramework = normalizePath(frameworkPath);
-  if (!(path === normalizedFramework || path.startsWith(`${normalizedFramework}/`))) {
+  if (!isInFrameworkScope(path, normalizedFramework)) {
     return null;
   }
 
@@ -245,32 +306,6 @@ function createSearchResultFromPage(page: AppleDocPage, frameworkPath: string): 
     kind: page.kind ?? "unknown",
     role: page.metadata?.role ?? "unknown",
   };
-}
-
-export function collectDirectMatchPaths(
-  page: AppleDocPage,
-  frameworkPath: string,
-  query: string,
-  limit = SEARCH_DIRECT_MATCH_LIMIT
-): string[] {
-  const normalizedFramework = normalizePath(frameworkPath);
-  const matches = new Set<string>();
-
-  for (const ref of Object.values(page.references ?? {})) {
-    const path = pathFromDocUrl(ref.url);
-    if (!path) continue;
-    if (!(path === normalizedFramework || path.startsWith(`${normalizedFramework}/`))) continue;
-    if (!matchesQuery(query, ref.title, ref.url, extractText(ref.abstract, page.references))) continue;
-    matches.add(path);
-    if (matches.size >= limit) break;
-  }
-
-  const likelySlug = queryToLikelySlug(query);
-  if (likelySlug) {
-    matches.add(`${normalizedFramework}/${likelySlug}`);
-  }
-
-  return Array.from(matches);
 }
 
 export function resolveChildPathFromParentPage(page: AppleDocPage, parentPath: string, unresolvedLeaf: string): string | null {
@@ -677,33 +712,11 @@ function extractTechnologySectionFromGroup(
   };
 }
 
-export function collectSearchPagePaths(page: AppleDocPage, frameworkPath: string, limit = SEARCH_CHILD_PAGE_LIMIT): string[] {
-  const normalizedFramework = normalizePath(frameworkPath);
-  const childPages = new Set<string>();
-
-  for (const ref of Object.values(page.references ?? {})) {
-    if (!ref.url) continue;
-    const path = pathFromDocUrl(ref.url);
-    if (!path) continue;
-    if (!(path === normalizedFramework || path.startsWith(`${normalizedFramework}/`))) continue;
-    if (!["collectionGroup", "collection", "article"].includes(ref.role ?? "")) continue;
-
-    if (path !== normalizedFramework) {
-      childPages.add(path);
-    }
-
-    if (childPages.size >= limit) break;
-  }
-
-  return Array.from(childPages);
-}
-
 export function searchReferencesInPage(
   page: AppleDocPage,
   query: string,
   frameworkPath: string
 ): SearchResult[] {
-  const lowerQuery = query.toLowerCase();
   const normalizedFramework = normalizePath(frameworkPath);
   const results: SearchResult[] = [];
 
@@ -712,22 +725,19 @@ export function searchReferencesInPage(
     if (ref.type !== "topic") continue;
     const path = pathFromDocUrl(ref.url);
     if (!path) continue;
-    if (!(path === normalizedFramework || path.startsWith(`${normalizedFramework}/`))) continue;
+    if (!isInFrameworkScope(path, normalizedFramework)) continue;
 
-    const titleMatch = ref.title.toLowerCase().includes(lowerQuery);
     const abstractText = extractText(ref.abstract, page.references);
-    const abstractMatch = abstractText.toLowerCase().includes(lowerQuery);
+    if (!matchesQuery(query, ref.title, path, abstractText)) continue;
 
-    if (titleMatch || abstractMatch) {
-      results.push({
-        title: ref.title,
-        path,
-        webUrl: buildWebUrl(path),
-        abstract: abstractText,
-        kind: ref.kind ?? "unknown",
-        role: ref.role ?? "unknown",
-      });
-    }
+    results.push({
+      title: ref.title,
+      path,
+      webUrl: buildWebUrl(path),
+      abstract: abstractText,
+      kind: ref.kind ?? "unknown",
+      role: ref.role ?? "unknown",
+    });
   }
 
   return results;
@@ -743,16 +753,33 @@ function searchResultScore(result: SearchResult, lowerQuery: string): number {
   // symbols like "map(_:)" since parens aren't word characters — use lookahead for
   // start-of-string or non-alphanumeric preceding character instead)
   const escaped = lowerQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  if (new RegExp(`(?:^|[^a-zA-Z0-9_])${escaped}`, "i").test(result.title)) return 2;
+  if (escaped && new RegExp(`(?:^|[^a-zA-Z0-9_])${escaped}`, "i").test(result.title)) return 2;
   // Title contains query anywhere
   if (lowerTitle.includes(lowerQuery)) return 3;
   // Abstract match only
   return 4;
 }
 
+// For multi-word queries, count how many individual terms hit the title/path/
+// abstract — a result matching all terms should outrank one matching only one,
+// even though neither contains the query as a literal phrase.
+function matchedTermCount(result: SearchResult, terms: string[]): number {
+  if (terms.length === 0) return 0;
+  const haystack = `${result.title} ${result.path} ${result.abstract}`.toLowerCase();
+  return terms.filter((term) => haystack.includes(term)).length;
+}
+
 function sortSearchResults(results: SearchResult[], query: string): SearchResult[] {
-  const lowerQuery = query.toLowerCase();
+  const lowerQuery = query.trim().toLowerCase();
+  const terms = splitQueryTerms(query);
+  // Precompute once per result rather than recomputing inside the O(n log n)
+  // comparator calls.
+  const matchCounts = terms.length > 1 ? new Map(results.map((r) => [r, matchedTermCount(r, terms)])) : null;
   return results.sort((a, b) => {
+    if (matchCounts) {
+      const diff = matchCounts.get(b)! - matchCounts.get(a)!;
+      if (diff !== 0) return diff;
+    }
     const aScore = searchResultScore(a, lowerQuery);
     const bScore = searchResultScore(b, lowerQuery);
     if (aScore !== bScore) return aScore - bScore;
@@ -1229,65 +1256,50 @@ export async function searchFramework(
     merged.set(result.path.toLowerCase(), result);
   }
 
-  // Fast path: if root page references already yield enough results, skip child-page fetches
+  // Fast path: if the root page's own references already yield enough
+  // results, skip the (larger) index fetch entirely.
   const directResults = dedupeSearchResults(Array.from(merged.values()));
   if (directResults.length >= limit) {
     return sortSearchResults(directResults, query).slice(0, limit);
   }
 
-  // Collect seed paths from direct matches, child collection pages, and topic section identifiers
+  // Second tier: fetch Apple's per-framework navigator index — the complete
+  // recursive symbol tree (enum cases, extension members, deeply nested type
+  // members) that a framework's own root page never lists. One fetch gives
+  // full recall; best-effort — fall back to tier-1 results if it fails.
   const normalizedFramework = normalizePath(frameworkPath);
-  const seedPaths = new Set<string>([
-    ...collectDirectMatchPaths(page, frameworkPath, query),
-    ...collectSearchPagePaths(page, frameworkPath),
-  ]);
-  // Also add paths from topicSections identifiers resolved via references
-  for (const section of page.topicSections ?? []) {
-    for (const id of section.identifiers) {
-      const ref = page.references && Object.prototype.hasOwnProperty.call(page.references, id) ? page.references[id] : undefined;
-      if (!ref?.url) continue;
-      const refPath = pathFromDocUrl(ref.url);
-      if (!refPath) continue;
-      if (!(refPath === normalizedFramework || refPath.startsWith(`${normalizedFramework}/`))) continue;
-      if (refPath !== normalizedFramework) seedPaths.add(refPath);
+  const topLevelFramework = normalizedFramework.split("/")[0];
+  let indexFetchFailed = false;
+  try {
+    const indexNodes = await fetchFrameworkIndex(topLevelFramework);
+    for (const symbol of flattenFrameworkIndexNodes(indexNodes)) {
+      if (!isInFrameworkScope(symbol.path, normalizedFramework)) continue;
+      if (!matchesQuery(query, symbol.title, symbol.path)) continue;
+      const key = symbol.path.toLowerCase();
+      if (merged.has(key)) continue; // tier-1 already has a result here with a real abstract
+      merged.set(key, {
+        title: symbol.title,
+        path: symbol.path,
+        webUrl: buildWebUrl(symbol.path),
+        abstract: "",
+        kind: symbol.type,
+        role: symbol.type,
+      });
     }
+  } catch {
+    indexFetchFailed = true;
   }
 
-  // Use rawFetchDocPage in search to avoid 404 resolution doubling requests
-  const childPages = await mapWithConcurrency(
-    Array.from(seedPaths),
-    SEARCH_CONCURRENCY_LIMIT,
-    (p) => rawFetchDocPage(p.toLowerCase())
-  );
-
-  // Track fetch failures to surface partial errors
-  let failedFetches = 0;
-  for (const childPage of childPages) {
-    if (childPage.status !== "fulfilled") {
-      failedFetches++;
-      continue;
-    }
-    const pageResult = createSearchResultFromPage(childPage.value, frameworkPath);
-    if (pageResult && matchesQuery(query, pageResult.title, pageResult.path, pageResult.abstract, searchTextForPage(childPage.value))) {
-      merged.set(pageResult.path.toLowerCase(), pageResult);
-    }
-    for (const result of searchReferencesInPage(childPage.value, query, frameworkPath)) {
-      merged.set(result.path.toLowerCase(), result);
-    }
-  }
-
-  // If a significant portion of fetches failed, inject a warning as metadata
   // Reserve one slot for the warning so we don't exceed the caller's limit
-  const hasWarning = failedFetches > 0 && failedFetches >= seedPaths.size * 0.5;
-  const resultLimit = hasWarning ? Math.max(limit - 1, 0) : limit;
+  const resultLimit = indexFetchFailed ? Math.max(limit - 1, 0) : limit;
   const results = sortSearchResults(dedupeSearchResults(Array.from(merged.values())), query).slice(0, resultLimit);
 
-  if (hasWarning) {
+  if (indexFetchFailed) {
     results.unshift({
       title: "⚠ Partial results",
       path: "",
       webUrl: "",
-      abstract: `${failedFetches} of ${seedPaths.size} sub-page fetches failed. Results may be incomplete — try again if needed.`,
+      abstract: `Could not load the full symbol index for "${topLevelFramework}" — results may be incomplete beyond what's listed on the framework's own page. Try again, or use apple_docs_get_page with an exact path.`,
       kind: "warning",
       role: "warning",
     });
@@ -1442,8 +1454,22 @@ export function formatSearchResultsMarkdown(
   query: string,
   frameworkPath: string
 ): string {
-  if (results.length === 0) {
-    return `No results found for "${query}" in framework "${frameworkPath}".`;
+  const realResults = results.filter((r) => r.kind !== "warning");
+
+  if (realResults.length === 0) {
+    const warning = results.find((r) => r.kind === "warning");
+    if (warning) {
+      // The full symbol-tree fetch failed, so this is inconclusive — not
+      // evidence the symbol doesn't exist, just that the search was incomplete.
+      return `No results found for "${query}" in framework "${frameworkPath}". ${warning.abstract}`;
+    }
+    return (
+      `No results found for "${query}" in framework "${frameworkPath}". ` +
+      `This search covers the framework's complete symbol tree (types, enum cases, extension members, and nested ` +
+      `members), not just its root documentation page — so this is good evidence the symbol doesn't exist under ` +
+      `that name in this framework, not just that it wasn't indexed. Double-check the framework and spelling, or ` +
+      `try apple_docs_get_page with a specific path if you know it.`
+    );
   }
 
   const lines = [

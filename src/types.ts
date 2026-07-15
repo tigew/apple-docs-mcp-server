@@ -235,3 +235,22 @@ export interface SearchResult {
   kind: string;
   role: string;
 }
+
+/**
+ * A node in Apple's per-framework navigator index (the full symbol tree that
+ * powers the docs-site sidebar), fetched from
+ *   https://developer.apple.com/tutorials/data/index/{framework}.json
+ */
+export interface AppleDocIndexNode {
+  title?: string;
+  path?: string;
+  type?: string;
+  deprecated?: boolean;
+  beta?: boolean;
+  external?: boolean;
+  children?: AppleDocIndexNode[];
+}
+
+export interface AppleDocIndexResponse {
+  interfaceLanguages?: Record<string, AppleDocIndexNode[]>;
+}

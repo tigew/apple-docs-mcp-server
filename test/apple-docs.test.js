@@ -2,12 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  collectSearchPagePaths,
-  collectDirectMatchPaths,
   dedupeSearchResults,
   extractOverview,
   extractParameters,
   extractText,
+  flattenFrameworkIndexNodes,
   formatDocPageMarkdown,
   formatSearchResultsMarkdown,
   normalizePath,
@@ -229,111 +228,6 @@ test("parseDocPage prefers the fetched page identifier over a stale requested al
   const parsed = parseDocPage(page, "swiftui/view/modifier(_:)-bogus");
   assert.equal(parsed.path, "swiftui/view/modifier(_:)");
   assert.equal(parsed.webUrl, "https://developer.apple.com/documentation/swiftui/view/modifier(_:)");
-});
-
-test("collectSearchPagePaths stays in-framework, dedupes, and respects its crawl cap", () => {
-  const references = {};
-  for (let index = 0; index < 30; index += 1) {
-    references[`doc://child/${index}`] = {
-      identifier: `doc://child/${index}`,
-      type: "topic",
-      title: `Child ${index}`,
-      role: "collectionGroup",
-      kind: "article",
-      url: `/documentation/foundation/child-${index}`,
-    };
-  }
-  references["doc://dup"] = {
-    identifier: "doc://dup",
-    type: "topic",
-    title: "Duplicate",
-    role: "collectionGroup",
-    kind: "article",
-    url: "/documentation/foundation/child-0",
-  };
-  references["doc://other-framework"] = {
-    identifier: "doc://other-framework",
-    type: "topic",
-    title: "Other",
-    role: "collectionGroup",
-    kind: "article",
-    url: "/documentation/uikit/not-allowed",
-  };
-
-  const paths = collectSearchPagePaths(
-    {
-      ...createBasePage(),
-      references,
-    },
-    "foundation"
-  );
-
-  assert.equal(paths.length, 30);
-  assert.equal(paths[0], "foundation/child-0");
-  assert.equal(paths.includes("uikit/not-allowed"), false);
-});
-
-test("collectDirectMatchPaths surfaces query-matching symbols and heuristic exact paths", () => {
-  const paths = collectDirectMatchPaths(
-    {
-      ...createBasePage(),
-      identifier: {
-        url: "/documentation/swiftui",
-        interfaceLanguage: "swift",
-      },
-      metadata: {
-        title: "SwiftUI",
-        role: "collection",
-        platforms: [],
-      },
-      references: {
-        "doc://animation": {
-          identifier: "doc://animation",
-          type: "topic",
-          title: "Animation",
-          role: "symbol",
-          kind: "symbol",
-          url: "/documentation/swiftui/animation",
-          abstract: [{ type: "text", text: "Animate state transitions." }],
-        },
-      },
-    },
-    "swiftui",
-    "animatable"
-  );
-
-  assert.equal(paths.includes("swiftui/animatable"), true);
-  assert.equal(paths.includes("swiftui/animation"), false);
-
-  const animationPaths = collectDirectMatchPaths(
-    {
-      ...createBasePage(),
-      identifier: {
-        url: "/documentation/swiftui",
-        interfaceLanguage: "swift",
-      },
-      metadata: {
-        title: "SwiftUI",
-        role: "collection",
-        platforms: [],
-      },
-      references: {
-        "doc://animation": {
-          identifier: "doc://animation",
-          type: "topic",
-          title: "Animation",
-          role: "symbol",
-          kind: "symbol",
-          url: "/documentation/swiftui/animation",
-          abstract: [{ type: "text", text: "Animate state transitions." }],
-        },
-      },
-    },
-    "swiftui",
-    "animation"
-  );
-
-  assert.equal(animationPaths.includes("swiftui/animation"), true);
 });
 
 test("resolveChildPathFromParentPage matches overloaded symbol paths by title and slug prefix", () => {
@@ -783,27 +677,6 @@ test("parseDocPage uses || for empty title fallback (BUG-13)", () => {
   assert.ok(parsed.title.length > 0);
 });
 
-test("collectSearchPagePaths normalizes extracted paths to lowercase (BUG-5)", () => {
-  const references = {
-    "doc://ref1": {
-      identifier: "doc://ref1",
-      type: "topic",
-      title: "URLSession",
-      role: "collection",
-      kind: "symbol",
-      url: "/documentation/Foundation/URLSession",
-    },
-  };
-
-  const paths = collectSearchPagePaths(
-    { ...createBasePage(), references },
-    "foundation"
-  );
-
-  assert.equal(paths.length, 1);
-  assert.equal(paths[0], "foundation/urlsession");
-});
-
 // =========================================================================
 // Improvement tests: parameters, breadcrumb, deprecation, path in items
 // =========================================================================
@@ -1106,37 +979,6 @@ test("searchReferencesInPage matches references with doc:// URIs (STRESS-1)", ()
   assert.equal(results[0].path, "swiftui/view");
 });
 
-test("collectSearchPagePaths handles doc:// URIs in references (STRESS-2)", () => {
-  const paths = collectSearchPagePaths(
-    {
-      ...createBasePage(),
-      references: {
-        "doc://com.apple.SwiftUI/documentation/SwiftUI/View-fundamentals": {
-          identifier: "doc://com.apple.SwiftUI/documentation/SwiftUI/View-fundamentals",
-          type: "topic",
-          title: "View fundamentals",
-          role: "collectionGroup",
-          kind: "article",
-          url: "doc://com.apple.SwiftUI/documentation/SwiftUI/View-fundamentals",
-        },
-        "doc://com.apple.SwiftUI/documentation/SwiftUI/Text": {
-          identifier: "doc://com.apple.SwiftUI/documentation/SwiftUI/Text",
-          type: "topic",
-          title: "Text",
-          role: "symbol",
-          kind: "symbol",
-          url: "doc://com.apple.SwiftUI/documentation/SwiftUI/Text",
-        },
-      },
-    },
-    "swiftui"
-  );
-
-  // Should find the collectionGroup but not the symbol
-  assert.equal(paths.length, 1);
-  assert.equal(paths[0], "swiftui/view-fundamentals");
-});
-
 test("normalizePath rejects zero-width Unicode characters (STRESS-3)", () => {
   assert.throws(() => normalizePath("swift\u200Bui"), /invisible Unicode/);
   assert.throws(() => normalizePath("swift\uFEFFui"), /invisible Unicode/);
@@ -1185,7 +1027,12 @@ test("parseDocPage handles missing identifiers in relationshipsSections graceful
 // Stress test round 2: overloaded symbol resolution, deprecation messages
 // =========================================================================
 
-test("resolveChildPathFromParentPage prefers non-deprecated overload when multiple match by title (STRESS-5)", () => {
+test("resolveChildPathFromParentPage picks the shortest path when multiple overloads match by title (STRESS-5)", () => {
+  // Note: Apple's reference data doesn't carry per-candidate deprecation info
+  // at this level (verified against the live swift/array.json — neither
+  // flatMap(_:) overload's own page reports deprecated:true), so there's no
+  // reliable signal to disambiguate "the deprecated one" here. This test
+  // exercises the length-based tie-break fallback, not deprecation-awareness.
   const parentPage = {
     ...createBasePage(),
     identifier: {
@@ -1198,16 +1045,16 @@ test("resolveChildPathFromParentPage prefers non-deprecated overload when multip
       platforms: [],
     },
     references: {
-      "doc://flatmap-deprecated": {
-        identifier: "doc://flatmap-deprecated",
+      "doc://flatmap-long-suffix": {
+        identifier: "doc://flatmap-long-suffix",
         type: "topic",
         title: "flatMap(_:)",
         role: "symbol",
         kind: "symbol",
         url: "/documentation/swift/array/flatmap(_:)-6chu8",
       },
-      "doc://flatmap-primary": {
-        identifier: "doc://flatmap-primary",
+      "doc://flatmap-short-suffix": {
+        identifier: "doc://flatmap-short-suffix",
         type: "topic",
         title: "flatMap(_:)",
         role: "symbol",
@@ -1220,7 +1067,7 @@ test("resolveChildPathFromParentPage prefers non-deprecated overload when multip
   const resolved = resolveChildPathFromParentPage(parentPage, "swift/array", "flatmap(_:)");
   assert.ok(resolved);
   // Should prefer the shorter path (no long hash suffix) when multiple title matches exist
-  assert.equal(resolved, "swift/array/flatmap(_:)-6chu8"); // first sorted by length
+  assert.equal(resolved, "swift/array/flatmap(_:)-i3mr");
 });
 
 test("resolveChildPathFromParentPage picks exact leaf when available among multiple title matches (STRESS-6)", () => {
@@ -1304,4 +1151,87 @@ test("safeTruncate-like behavior: clampJsonResponse handles content safely", () 
   const markdown = formatDocPageMarkdown(parsed);
   assert.ok(markdown.length > 0);
   assert.match(markdown, /# Test/);
+});
+
+// =========================================================================
+// flattenFrameworkIndexNodes: navigator-index tree flattening
+// =========================================================================
+
+test("flattenFrameworkIndexNodes recurses into children and normalizes paths", () => {
+  const tree = [
+    {
+      title: "AVCaptureSession",
+      path: "/documentation/AVFoundation/AVCaptureSession",
+      type: "class",
+      children: [
+        {
+          title: "var automaticallyRunsDeferredStart: Bool",
+          path: "/documentation/AVFoundation/AVCaptureSession/automaticallyRunsDeferredStart",
+          type: "property",
+        },
+      ],
+    },
+  ];
+
+  const flattened = flattenFrameworkIndexNodes(tree);
+  assert.equal(flattened.length, 2);
+  assert.equal(flattened[0].path, "avfoundation/avcapturesession");
+  assert.equal(flattened[1].path, "avfoundation/avcapturesession/automaticallyrunsdeferredstart");
+  assert.equal(flattened[1].type, "property");
+});
+
+test("flattenFrameworkIndexNodes skips group markers (no path) and external links", () => {
+  const tree = [
+    {
+      title: "Capture",
+      type: "groupMarker",
+      children: [
+        {
+          title: "AVCaptureDevice",
+          path: "/documentation/AVFoundation/AVCaptureDevice",
+          type: "class",
+        },
+      ],
+    },
+    {
+      title: "External guide",
+      path: "https://example.com/guide",
+      type: "article",
+      external: true,
+    },
+  ];
+
+  const flattened = flattenFrameworkIndexNodes(tree);
+  assert.equal(flattened.length, 1);
+  assert.equal(flattened[0].path, "avfoundation/avcapturedevice");
+});
+
+test("flattenFrameworkIndexNodes falls back to the normalized path when title is missing", () => {
+  const tree = [{ path: "/documentation/Foundation/URLSession", type: "class" }];
+  const flattened = flattenFrameworkIndexNodes(tree);
+  assert.equal(flattened.length, 1);
+  assert.equal(flattened[0].title, "foundation/urlsession");
+});
+
+// =========================================================================
+// formatSearchResultsMarkdown: partial-failure warning messaging
+// =========================================================================
+
+test("formatSearchResultsMarkdown treats an index-fetch-failure warning as inconclusive, not a definitive empty result", () => {
+  const warningOnly = [
+    {
+      title: "⚠ Partial results",
+      path: "",
+      webUrl: "",
+      abstract: "Could not load the full symbol index for \"avfoundation\" — try again.",
+      kind: "warning",
+      role: "warning",
+    },
+  ];
+
+  const markdown = formatSearchResultsMarkdown(warningOnly, "deferred", "avfoundation");
+  assert.match(markdown, /No results found/);
+  assert.match(markdown, /Could not load the full symbol index/);
+  // Should NOT claim this is evidence the symbol doesn't exist — the search was incomplete
+  assert.doesNotMatch(markdown, /good evidence the symbol doesn't exist/);
 });

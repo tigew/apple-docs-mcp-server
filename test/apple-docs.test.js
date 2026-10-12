@@ -2,7 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  boundedEditDistance,
   dedupeSearchResults,
+  formatGlobalSearchResultsMarkdown,
+  formatTechnologiesMarkdown,
+  parseGlobalSearchResponse,
+  resolveFromIndexSymbols,
   extractOverview,
   extractParameters,
   extractText,
@@ -43,6 +48,44 @@ test("normalizePath accepts Apple docs URLs and strips transport-only suffixes",
     "swiftui/view"
   );
   assert.equal(normalizePath("/documentation/Foundation/URLSession/"), "foundation/urlsession");
+});
+
+test("normalizePath preserves the design/ tree for HIG paths across input forms", () => {
+  // Design (HIG / SF Symbols) pages keep their design/ prefix as the canonical
+  // path — that prefix is how fetch routing picks the /design/ JSON endpoint.
+  assert.equal(
+    normalizePath("design/Human-Interface-Guidelines/Buttons"),
+    "design/human-interface-guidelines/buttons"
+  );
+  assert.equal(
+    normalizePath("https://developer.apple.com/design/human-interface-guidelines/typography"),
+    "design/human-interface-guidelines/typography"
+  );
+  assert.equal(
+    normalizePath("doc://com.apple.HIG/design/Human-Interface-Guidelines/sf-symbols"),
+    "design/human-interface-guidelines/sf-symbols"
+  );
+  // The documentation tree still strips its prefix (unchanged behavior).
+  assert.equal(
+    normalizePath("doc://com.apple.SwiftUI/documentation/SwiftUI/View"),
+    "swiftui/view"
+  );
+});
+
+test("parseDocPage builds a /design/ web URL for HIG pages, not /documentation/design/", () => {
+  const page = {
+    identifier: { url: "doc://com.apple.HIG/design/Human-Interface-Guidelines/buttons", interfaceLanguage: "swift" },
+    kind: "article",
+    metadata: { title: "Buttons", role: "collection", platforms: [] },
+    abstract: [{ type: "text", text: "Guidance on buttons." }],
+    primaryContentSections: [],
+    topicSections: [],
+    seeAlsoSections: [],
+    relationshipsSections: [],
+  };
+  const parsed = parseDocPage(page, "design/human-interface-guidelines/buttons");
+  assert.equal(parsed.path, "design/human-interface-guidelines/buttons");
+  assert.equal(parsed.webUrl, "https://developer.apple.com/design/human-interface-guidelines/buttons");
 });
 
 test("normalizePath rejects traversal and empty normalized paths", () => {
@@ -579,6 +622,38 @@ test("extractOverview handles table with missing cell content (BUG-6)", () => {
   assert.match(overview, /Header/);
   assert.match(overview, /Data/);
   assert.match(overview, /Val/);
+});
+
+test("extractOverview renders DocC 'rows: Cell[][]' tables (TN3191 table-drop bug)", () => {
+  // Real DocC render schema: a row IS the array of cells, and each cell is an
+  // array of content blocks — not { cells: [{ content }] }. The old converter
+  // looked for row.cells (always undefined here) and silently dropped every
+  // data row, leaving a header-less "|  |\n| --- |" husk.
+  const cell = (text) => [{ type: "paragraph", inlineContent: [{ type: "text", text }] }];
+  const overview = extractOverview([
+    {
+      kind: "content",
+      content: [
+        {
+          type: "table",
+          header: "row",
+          rows: [
+            [cell("RFC"), cell("Capability"), cell("Description")],
+            [cell("RFC 3501"), cell("Pipelining"), cell("Enqueues multiple IMAP commands.")],
+            [cell("RFC 2177"), cell("IDLE"), cell("Server pushes mailbox updates.")],
+          ],
+        },
+      ],
+    },
+  ]);
+
+  // Header row and both data rows must survive.
+  assert.match(overview, /\| RFC \| Capability \| Description \|/);
+  assert.match(overview, /Pipelining/);
+  assert.match(overview, /RFC 2177/);
+  assert.match(overview, /Server pushes mailbox updates\./);
+  // The separator row exists and the table is not an empty husk.
+  assert.match(overview, /\| --- \| --- \| --- \|/);
 });
 
 test("extractOverview handles links content type (NEW-5)", () => {
@@ -1234,4 +1309,158 @@ test("formatSearchResultsMarkdown treats an index-fetch-failure warning as incon
   assert.match(markdown, /Could not load the full symbol index/);
   // Should NOT claim this is evidence the symbol doesn't exist — the search was incomplete
   assert.doesNotMatch(markdown, /good evidence the symbol doesn't exist/);
+});
+
+// =========================================================================
+// 404 suggestion engine: boundedEditDistance, resolveFromIndexSymbols,
+// parseGlobalSearchResponse
+// =========================================================================
+
+test("boundedEditDistance computes small distances and bails past the bound", () => {
+  assert.equal(boundedEditDistance("relevance()", "relevance()", 2), 0);
+  assert.equal(boundedEditDistance("relevances()", "relevance()", 2), 1);
+  assert.equal(boundedEditDistance("kitten", "sitting", 2), 3); // real distance 3 → max+1
+  assert.equal(boundedEditDistance("short", "muchlongerstring", 2), 3); // length gap fast path
+});
+
+test("resolveFromIndexSymbols lists every overload of a bare member name with declarations", () => {
+  const symbols = [
+    { title: "func result(value: V) -> Self", path: "appintents/intentresultcontainer/result(value:)-8x1q2", type: "method" },
+    { title: "func result() -> Self", path: "appintents/intentresultcontainer/result()-3k9f", type: "method" },
+    { title: "func result(dialog: IntentDialog) -> Self", path: "appintents/intentresultcontainer/result(dialog:)", type: "method" },
+    { title: "SomethingElse", path: "appintents/somethingelse", type: "struct" },
+  ];
+
+  const resolution = resolveFromIndexSymbols("appintents/intentresultcontainer/result", symbols);
+  assert.equal(resolution.autoResolvePath, undefined); // multiple overloads → never auto-resolve
+  assert.equal(resolution.suggestions.length, 3);
+  assert.ok(resolution.suggestions.every((s) => s.path.includes("/result(") || s.path.includes("/result()")));
+  assert.ok(resolution.suggestions.some((s) => s.title.includes("dialog:")));
+});
+
+test("resolveFromIndexSymbols auto-resolves a bare name with exactly one overload", () => {
+  const symbols = [
+    { title: "func onAppear(perform: (() -> Void)?) -> some View", path: "swiftui/view/onappear(perform:)", type: "method" },
+  ];
+  const resolution = resolveFromIndexSymbols("swiftui/view/onappear", symbols);
+  assert.equal(resolution.autoResolvePath, "swiftui/view/onappear(perform:)");
+});
+
+test("resolveFromIndexSymbols auto-resolves renamed types via punctuation-insensitive title match", () => {
+  const symbols = [
+    { title: "CKShare.Metadata", path: "cloudkit/ckshare/metadata", type: "class" },
+    { title: "CKShare", path: "cloudkit/ckshare", type: "class" },
+  ];
+  const resolution = resolveFromIndexSymbols("cloudkit/cksharemetadata", symbols);
+  assert.equal(resolution.autoResolvePath, "cloudkit/ckshare/metadata");
+  assert.equal(resolution.suggestions[0].title, "CKShare.Metadata");
+});
+
+test("resolveFromIndexSymbols suggests but never auto-resolves typo matches", () => {
+  const symbols = [
+    { title: "func relevance() async -> WidgetRelevance<Self.Intent>", path: "widgetkit/appintenttimelineprovider/relevance()", type: "method" },
+    { title: "func placeholder(in: Context) -> Entry", path: "widgetkit/appintenttimelineprovider/placeholder(in:)", type: "method" },
+  ];
+  const resolution = resolveFromIndexSymbols("widgetkit/appintenttimelineprovider/relevances()", symbols);
+  assert.equal(resolution.autoResolvePath, undefined);
+  assert.equal(resolution.suggestions.length, 1);
+  assert.equal(resolution.suggestions[0].path, "widgetkit/appintenttimelineprovider/relevance()");
+});
+
+test("resolveFromIndexSymbols auto-resolves an exact symbol name found at one other spot in the framework", () => {
+  const symbols = [
+    { title: "TimelineEntryRelevance", path: "widgetkit/timelineentryrelevance", type: "struct" },
+  ];
+  const resolution = resolveFromIndexSymbols("widgetkit/timelineentry/timelineentryrelevance", symbols);
+  assert.equal(resolution.autoResolvePath, "widgetkit/timelineentryrelevance");
+});
+
+test("parseGlobalSearchResponse validates permalinks, dedupes, and extracts framework names", () => {
+  const data = {
+    results: [
+      {
+        documentation: {
+          metadata: {
+            title: "RelevantContext",
+            permalink: "https://developer.apple.com/documentation/relevancekit/relevantcontext",
+            hierarchy: "RelevanceKit > RelevantContext",
+            description: "Contextual clues.",
+            availability: "iOS 17.0+",
+          },
+        },
+      },
+      {
+        documentation: {
+          metadata: {
+            title: "Duplicate",
+            permalink: "https://developer.apple.com/documentation/relevancekit/relevantcontext",
+          },
+        },
+      },
+      {
+        documentation: {
+          metadata: {
+            title: "Evil",
+            permalink: "https://evil.example.com/documentation/relevancekit/relevantcontext",
+          },
+        },
+      },
+      { notDocumentation: {} },
+    ],
+  };
+
+  const results = parseGlobalSearchResponse(data, 10);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].path, "relevancekit/relevantcontext");
+  assert.equal(results[0].framework, "RelevanceKit");
+  assert.equal(results[0].availability, "iOS 17.0+");
+  assert.equal(results[0].webUrl, "https://developer.apple.com/documentation/relevancekit/relevantcontext");
+
+  assert.deepEqual(parseGlobalSearchResponse(null, 5), []);
+  assert.deepEqual(parseGlobalSearchResponse({ error: { message: "nope" } }, 5), []);
+});
+
+test("formatTechnologiesMarkdown compact mode drops abstracts but keeps every framework", () => {
+  const parsed = {
+    sections: [
+      {
+        title: "App Services",
+        technologies: [
+          { title: "RelevanceKit", url: "/documentation/relevancekit", abstract: "Provide relevance clues.", role: "collection" },
+          { title: "WidgetKit", url: "/documentation/widgetkit", abstract: "Extend apps with widgets.", role: "collection" },
+        ],
+      },
+    ],
+  };
+
+  const full = formatTechnologiesMarkdown(parsed);
+  assert.match(full, /Provide relevance clues/);
+
+  const compact = formatTechnologiesMarkdown(parsed, { compact: true });
+  assert.doesNotMatch(compact, /Provide relevance clues/);
+  assert.match(compact, /\*\*RelevanceKit\*\* \(`relevancekit`\)/);
+  assert.match(compact, /\*\*WidgetKit\*\* \(`widgetkit`\)/);
+  assert.match(compact, /Descriptions omitted/);
+});
+
+test("formatGlobalSearchResultsMarkdown renders results and a helpful empty state", () => {
+  const markdown = formatGlobalSearchResultsMarkdown(
+    [
+      {
+        title: "RelevantContext",
+        path: "relevancekit/relevantcontext",
+        webUrl: "https://developer.apple.com/documentation/relevancekit/relevantcontext",
+        framework: "RelevanceKit",
+        description: "Contextual clues.",
+        availability: "iOS 17.0+",
+      },
+    ],
+    "RelevantContext"
+  );
+  assert.match(markdown, /\*\*Framework\*\*: RelevanceKit/);
+  assert.match(markdown, /`relevancekit\/relevantcontext`/);
+
+  const empty = formatGlobalSearchResultsMarkdown([], "nonexistent");
+  assert.match(empty, /No results found/);
+  assert.match(empty, /apple_docs_search/);
 });

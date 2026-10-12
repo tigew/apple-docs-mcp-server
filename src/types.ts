@@ -49,8 +49,21 @@ export interface AppleDocContentItem {
   items?: unknown[];
   // Table fields (avoids unsafe `as unknown as` casts)
   header?: string;
-  rows?: Array<{ cells: Array<{ content?: AppleDocContentItem[] }> }>;
+  rows?: AppleDocTableRow[];
 }
+
+/** A table cell is an array of content blocks (paragraphs, code, etc.). */
+export type AppleDocTableCell = AppleDocContentItem[];
+
+/**
+ * DocC's render schema encodes a table row as an array of cells
+ * (`rows: Cell[][]`, each cell an array of content blocks). An older/alternate
+ * shape wrapped the cells in an object (`{ cells: [{ content: [...] }] }`).
+ * Both are accepted so the converter is robust to either.
+ */
+export type AppleDocTableRow =
+  | AppleDocTableCell[]
+  | { cells?: Array<AppleDocTableCell | { content?: AppleDocTableCell }> };
 
 export interface AppleDocParameter {
   name: string;
@@ -234,6 +247,38 @@ export interface SearchResult {
   abstract: string;
   kind: string;
   role: string;
+}
+
+/** One hit from Apple's global (cross-framework) search API. */
+export interface GlobalSearchResult {
+  title: string;
+  path: string;
+  webUrl: string;
+  framework: string;
+  description: string;
+  availability?: string;
+}
+
+/**
+ * A symbol suggested as an alternative when a documentation path 404s
+ * (typo correction, renamed type, overload disambiguation, or a hit in
+ * another framework).
+ */
+export interface PathSuggestion {
+  path: string;
+  title: string;
+  framework?: string;
+}
+
+/** Outcome of trying to resolve a 404'd path against the symbol indexes. */
+export interface PathResolution {
+  /** Set when exactly one high-confidence match exists — safe to fetch transparently. */
+  autoResolvePath?: string;
+  suggestions: PathSuggestion[];
+  /** True when the suggestions came from other frameworks via global search. */
+  crossFramework: boolean;
+  /** Matches beyond the suggestion cap that were not included. */
+  omittedCount?: number;
 }
 
 /**

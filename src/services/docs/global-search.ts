@@ -2,9 +2,9 @@
  * Cross-framework search via the API behind the developer.apple.com search page.
  */
 
-import { APPLE_GLOBAL_SEARCH_URL, GLOBAL_SEARCH_TIMEOUT_MS } from "../../constants.js";
+import { APPLE_GLOBAL_SEARCH_HOST, APPLE_GLOBAL_SEARCH_URL, GLOBAL_SEARCH_TIMEOUT_MS } from "../../constants.js";
 import { GlobalSearchResult } from "../../types.js";
-import { httpClient } from "./http.js";
+import { postJsonForText, SERVER_USER_AGENT } from "../safe-fetch.js";
 import { buildWebUrl, pathFromDocUrl } from "./paths.js";
 
 /**
@@ -85,16 +85,13 @@ export function assembleSearchStream(body: string): unknown {
  * (it is not a full-text index).
  */
 export async function searchGlobalSymbols(query: string, limit: number): Promise<GlobalSearchResult[]> {
-  const response = await httpClient.post<string>(
+  const stream = await postJsonForText(
     APPLE_GLOBAL_SEARCH_URL,
     // "search" only: the endpoint can also stream quick results and a generated
     // answer ("ask"), neither of which this tool uses.
     { text: query, targetResultLocale: "en", includedResponses: ["search"] },
-    {
-      headers: { Accept: "application/jsonl", "Content-Type": "application/json" },
-      responseType: "text",
-      timeout: GLOBAL_SEARCH_TIMEOUT_MS,
-    }
+    [APPLE_GLOBAL_SEARCH_HOST],
+    { accept: "application/jsonl", timeoutMs: GLOBAL_SEARCH_TIMEOUT_MS, userAgent: SERVER_USER_AGENT }
   );
-  return parseGlobalSearchResponse(assembleSearchStream(String(response.data ?? "")), limit);
+  return parseGlobalSearchResponse(assembleSearchStream(stream), limit);
 }

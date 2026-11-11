@@ -1,22 +1,27 @@
 /**
- * Shared, SSRF-hardened fetch helpers for the non-`developer.apple.com/documentation`
- * surfaces (Swift.org, WWDC, App Store Review Guidelines, App Store Connect Help,
- * Developer Forums).
+ * The server's only HTTP layer: SSRF-hardened fetch helpers shared by every
+ * surface (the documentation JSON API, Swift.org, WWDC, App Store Review
+ * Guidelines, App Store Connect Help, Developer Forums, ...).
  *
- * The original documentation scraper is anchored to a single host on purpose.
- * Every surface added here talks to a *different* origin, so each one must pass
- * an explicit host allowlist through this module — a URL is only fetched if its
- * scheme is HTTPS and its hostname is in the caller's allowlist. That keeps a
- * user-supplied path/slug from being coerced into an arbitrary host.
+ * Each surface talks to its own origin, so every call passes an explicit host
+ * allowlist — a URL is only fetched if its scheme is HTTPS and its hostname is
+ * in the caller's allowlist. That keeps a user-supplied path/slug from being
+ * coerced into an arbitrary host. Redirects are never followed automatically:
+ * they are either returned to the caller or followed hop by hop with the
+ * allowlist re-checked each time.
  */
 
 import axios from "axios";
 import { REQUEST_TIMEOUT_MS } from "../constants.js";
+import { VERSION } from "../version.js";
 
 // Help-center articles are the largest of these pages (~370KB); WWDC pages
 // ~150KB. 8MB leaves generous headroom without inviting a decompression bomb.
 const HTML_MAX_BYTES = 8 * 1024 * 1024;
 const JSON_MAX_BYTES = 8 * 1024 * 1024;
+
+/** Identifies this server to Apple's JSON APIs, which don't vary by user agent. */
+export const SERVER_USER_AGENT = `apple-docs-mcp-server/${VERSION}`;
 
 // Some Apple pages vary their markup for non-browser agents; present a normal
 // Safari UA so we get the same server-rendered HTML a browser would.
@@ -125,17 +130,35 @@ export async function fetchHtmlFollow(url: string, allowedHosts: readonly string
   throw new Error(`Too many redirects fetching ${url}.`);
 }
 
+export interface JsonFetchOptions {
+  /** Response size cap in bytes (default 8MB). */
+  maxBytes?: number;
+  /** User-Agent header (default: a browser UA). */
+  userAgent?: string;
+}
+
 /**
- * Fetch and parse a JSON document from an allowlisted host. Guards against
- * non-object payloads (e.g. an HTML error page served with a 200).
+ * Fetch and parse a JSON document from an allowlisted host, following up to
+ * MAX_JSON_REDIRECTS redirects. Rejects with an AxiosError on a 4xx/5xx
+ * status, and guards against non-object payloads (e.g. an HTML error page
+ * served with a 200).
  */
-export async function fetchJson<T>(url: string, allowedHosts: readonly string[]): Promise<T> {
+export async function fetchJson<T>(
+  url: string,
+  allowedHosts: readonly string[],
+  options: JsonFetchOptions = {}
+): Promise<T> {
+  const maxBytes = options.maxBytes ?? JSON_MAX_BYTES;
   let current = url;
   for (let hop = 0; hop <= MAX_JSON_REDIRECTS; hop++) {
     // Re-validate scheme + host on EVERY hop, including redirect targets — a 3xx
     // Location must not be able to smuggle the fetch to a non-allowlisted host.
     assertAllowedUrl(current, allowedHosts);
-    const response = await jsonClient.get<T>(current);
+    const response = await jsonClient.get<T>(current, {
+      maxContentLength: maxBytes,
+      maxBodyLength: maxBytes,
+      ...(options.userAgent ? { headers: { "User-Agent": options.userAgent } } : {}),
+    });
 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers?.location;
@@ -153,4 +176,43 @@ export async function fetchJson<T>(url: string, allowedHosts: readonly string[])
     return data;
   }
   throw new Error(`Too many redirects fetching ${url}.`);
+}
+
+export interface PostOptions {
+  /** Accept header describing the expected response body. */
+  accept: string;
+  /** Request timeout in milliseconds (default REQUEST_TIMEOUT_MS). */
+  timeoutMs?: number;
+  /** User-Agent header (default: a browser UA). */
+  userAgent?: string;
+}
+
+/**
+ * POST a JSON body to an allowlisted host and return the response body as
+ * text, unparsed. Rejects with an AxiosError on any non-2xx status; a redirect
+ * is never followed, since re-sending a POST body to another URL is not
+ * something any of these APIs should ask for.
+ */
+export async function postJsonForText(
+  url: string,
+  body: unknown,
+  allowedHosts: readonly string[],
+  options: PostOptions
+): Promise<string> {
+  assertAllowedUrl(url, allowedHosts);
+  const response = await axios.post<string>(url, body, {
+    timeout: options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+    maxContentLength: JSON_MAX_BYTES,
+    maxBodyLength: JSON_MAX_BYTES,
+    maxRedirects: 0,
+    responseType: "text",
+    headers: {
+      Accept: options.accept,
+      "Content-Type": "application/json",
+      "User-Agent": options.userAgent ?? BROWSER_UA,
+      "Accept-Encoding": "gzip, deflate, br",
+    },
+    validateStatus: (status) => status >= 200 && status < 300,
+  });
+  return typeof response.data === "string" ? response.data : String(response.data ?? "");
 }

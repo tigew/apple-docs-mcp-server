@@ -1,51 +1,27 @@
 /**
- * HTTP access to Apple's documentation JSON API: allowlisted clients, raw page fetch with
- * in-flight de-duplication, and translation of transport errors into user-facing messages.
+ * Access to Apple's documentation JSON API on top of the shared HTTP layer: raw page fetch
+ * with in-flight de-duplication, and translation of transport errors into user-facing messages.
  */
 
-import { APPLE_DEV_HOST, APPLE_GLOBAL_SEARCH_HOST, REQUEST_TIMEOUT_MS } from "../../constants.js";
+import { APPLE_DEV_HOST } from "../../constants.js";
 import { AppleDocPage } from "../../types.js";
-import { assertAllowedUrl } from "../safe-fetch.js";
-import axios, { AxiosError } from "axios";
+import { fetchJson, SERVER_USER_AGENT } from "../safe-fetch.js";
+import { AxiosError } from "axios";
 import { docJsonUrl } from "./paths.js";
 
-// Re-validate every redirect target (scheme + host allowlist) — matching the
-// safe-fetch clients used by the newer surfaces. maxRedirects caps the chain
-// length; this guard ensures a 3xx can't hop the fetch to a non-allowlisted
-// host (or downgrade to http) partway through the chain.
-export function makeRedirectGuard(allowedHosts: readonly string[]) {
-  return (options: { href?: string; protocol?: string; host?: string; hostname?: string; path?: string }) => {
-    const href =
-      options.href ??
-      `${options.protocol ?? "https:"}//${options.host ?? options.hostname ?? ""}${options.path ?? ""}`;
-    assertAllowedUrl(href, allowedHosts); // throws → aborts the redirect
-  };
+// Size caps for the two kinds of payload. Framework navigator-index payloads
+// are much larger than a single doc page (Foundation's is ~6.8MB), so they get
+// their own, higher cap rather than raising the cap on every page fetch.
+const DOC_PAGE_MAX_BYTES = 10 * 1024 * 1024;
+export const FRAMEWORK_INDEX_MAX_BYTES = 20 * 1024 * 1024;
+
+/**
+ * GET a JSON document from the documentation origin. Rejects with an
+ * AxiosError on a 4xx/5xx status, so callers can branch on a 404.
+ */
+export function fetchDocsJson<T>(url: string, maxBytes: number = DOC_PAGE_MAX_BYTES): Promise<T> {
+  return fetchJson<T>(url, [APPLE_DEV_HOST], { maxBytes, userAgent: SERVER_USER_AGENT });
 }
-
-export function createDocsHttpClient(maxBytes: number, allowedHosts: readonly string[]) {
-  return axios.create({
-    timeout: REQUEST_TIMEOUT_MS,
-    maxContentLength: maxBytes, // RED-201
-    maxBodyLength: maxBytes,    // RED-201
-    maxRedirects: 3, // Limit redirects to prevent redirect-chain SSRF
-    beforeRedirect: makeRedirectGuard(allowedHosts),
-    headers: {
-      Accept: "application/json",
-      "User-Agent": "apple-docs-mcp-server/1.0",
-    },
-  });
-}
-
-// The page/global-search client reaches both the docs origin and the global
-// search host; the index client only ever reaches the docs origin.
-export const httpClient = createDocsHttpClient(10 * 1024 * 1024, [APPLE_DEV_HOST, APPLE_GLOBAL_SEARCH_HOST]);
-
- // 10MB — a single doc page
-
-// Framework navigator-index payloads are much larger than a single doc page
-// (Foundation's is ~6.6MB) — a dedicated client keeps that headroom off the
-// normal per-page fetch path.
-export const indexHttpClient = createDocsHttpClient(20 * 1024 * 1024, [APPLE_DEV_HOST]);
 
 // In-flight request deduplication: avoid fetching the same URL concurrently
 // (e.g., during parallel search where multiple workers request the same child page)
@@ -56,8 +32,7 @@ export function rawFetchDocPage(normalizedPath: string): Promise<AppleDocPage> {
   if (existing) return existing;
 
   const url = docJsonUrl(normalizedPath);
-  const promise = httpClient.get<AppleDocPage>(url).then((response) => {
-    const data = response.data;
+  const promise = fetchDocsJson<AppleDocPage>(url).then((data) => {
     // Guard against non-JSON responses (e.g., HTML redirect pages)
     if (!data || typeof data !== "object" || Array.isArray(data)) {
       throw new Error(`Unexpected response format for "${normalizedPath}": expected JSON object.`);

@@ -6,7 +6,7 @@ import { APPLE_DOCS_BASE_URL, MAX_RECURSION_DEPTH } from "../../constants.js";
 import { AppleDocIndexNode, AppleDocIndexResponse } from "../../types.js";
 import { AxiosError } from "axios";
 import { createTtlCache } from "./cache.js";
-import { indexHttpClient } from "./http.js";
+import { fetchDocsJson, FRAMEWORK_INDEX_MAX_BYTES } from "./http.js";
 import { pathFromDocUrl } from "./paths.js";
 
 // Framework navigator-index payloads are much larger (up to several MB) than
@@ -35,10 +35,9 @@ export async function fetchFrameworkIndex(topLevelFramework: string): Promise<Ap
   const cached = getCachedIndex(topLevelFramework);
   if (cached) return cached;
 
-  const nodes = await loadFrameworkIndexNodes(topLevelFramework, async (url) => {
-    const response = await indexHttpClient.get<unknown>(url);
-    return response.data;
-  });
+  const nodes = await loadFrameworkIndexNodes(topLevelFramework, (url) =>
+    fetchDocsJson<unknown>(url, FRAMEWORK_INDEX_MAX_BYTES)
+  );
 
   setCachedIndex(topLevelFramework, nodes);
   return nodes;

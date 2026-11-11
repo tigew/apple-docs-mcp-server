@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // End-to-end checks of the built server over stdio. Everything here is answered
@@ -8,7 +9,8 @@ import { fileURLToPath } from "node:url";
 
 const SERVER = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
-// Start the server, hand `use` a JSON-RPC request function, and stop the server.
+// Start the server, hand `use` a JSON-RPC request function plus the server's
+// `initialize` result, and stop the server.
 async function withServer(use) {
   const child = spawn(process.execPath, [SERVER], { stdio: ["pipe", "pipe", "ignore"] });
   const pending = new Map();
@@ -40,13 +42,13 @@ async function withServer(use) {
     });
 
   try {
-    await rpc("initialize", {
+    const initialized = await rpc("initialize", {
       protocolVersion: "2025-03-26",
       capabilities: {},
       clientInfo: { name: "server-test", version: "0" },
     });
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
-    return await use(rpc);
+    return await use(rpc, initialized);
   } finally {
     child.kill();
   }
@@ -97,4 +99,12 @@ test("a tool reports a rejected input as an error result, not a failed request",
 
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /^Error: Invalid path .*path traversal/);
+});
+
+test("the server reports the version from package.json", async () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+
+  const initialized = await withServer((_rpc, initialized) => initialized);
+
+  assert.equal(initialized.serverInfo.version, packageJson.version);
 });

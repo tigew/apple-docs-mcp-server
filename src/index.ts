@@ -21,6 +21,7 @@ import { registerSupportKbTools } from "./tools/support-kb.js";
 import { registerMlResearchTools } from "./tools/ml-research.js";
 import { registerDeveloperNewsTools } from "./tools/developer-news.js";
 import { registerTechnicalQaTools } from "./tools/technical-qa.js";
+import { VERSION } from "./version.js";
 
 // ---------------------------------------------------------------------------
 // Server
@@ -28,7 +29,7 @@ import { registerTechnicalQaTools } from "./tools/technical-qa.js";
 
 const server = new McpServer({
   name: "apple-docs-mcp-server",
-  version: "1.0.0",
+  version: VERSION,
 });
 
 // Registration order is the order clients list the tools in.

@@ -15,7 +15,7 @@ export enum ResponseFormat {
 
 /** The `response_format` input every formatted tool accepts. */
 export const responseFormatParam = z
-  .nativeEnum(ResponseFormat)
+  .enum(ResponseFormat)
   .default(ResponseFormat.MARKDOWN)
   .describe("Output format: 'markdown' for human-readable or 'json' for machine-readable");
 

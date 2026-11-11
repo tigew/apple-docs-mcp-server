@@ -48,6 +48,11 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
     lines.push("");
   }
 
+  if (parsed.objcUnavailable) {
+    lines.push("> **Note:** This page has no Objective-C version. Showing it as published.");
+    lines.push("");
+  }
+
   // Deprecation banner at top
   if (parsed.deprecated) {
     let banner = `> **DEPRECATED**${parsed.deprecatedAt ? ` (${parsed.deprecatedAt})` : ""}`;
@@ -97,7 +102,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
 
   if (parsed.declaration) {
     lines.push(`## Declaration`);
-    lines.push(`\`\`\`swift`);
+    lines.push(`\`\`\`${parsed.declarationLanguage ?? ""}`);
     lines.push(parsed.declaration);
     lines.push(`\`\`\``);
     lines.push("");
@@ -316,6 +321,7 @@ export function formatSearchResultsMarkdown(
 
   for (const result of results) {
     lines.push(`## ${result.title}`);
+    if (result.objcTitle) lines.push(`**Objective-C name**: \`${result.objcTitle}\``);
     lines.push(`**Path**: \`${result.path}\` | **Kind**: ${result.kind} | **Role**: ${result.role}`);
     lines.push(`**URL**: ${result.webUrl}`);
     if (result.abstract) lines.push(result.abstract);

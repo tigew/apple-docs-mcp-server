@@ -4,7 +4,7 @@
  */
 
 import { AppleDocPage, PathResolution, PathSuggestion } from "../../types.js";
-import { FlattenedIndexSymbol, fetchFrameworkIndex, flattenFrameworkIndexNodes } from "./framework-index.js";
+import { FlattenedIndexSymbol, fetchFrameworkSymbols } from "./framework-index.js";
 import { searchGlobalSymbols } from "./global-search.js";
 import { rawFetchDocPage } from "./http.js";
 import { alnumKey, baseSymbolName, collectLeafLookupKeys, collectTitleLookupKeys, normalizePath, pathFromDocUrl, queryToLikelySlug, stripLeafDisambiguation } from "./paths.js";
@@ -178,6 +178,15 @@ export function resolveFromIndexSymbols(
     ) {
       renames.push(suggestion);
     } else if (
+      // An Objective-C selector used as the path ("drawrect:"): the method is
+      // documented on the page it shares with its Swift name ("draw(_:)").
+      symbolParent === parentPath &&
+      symbol.objcTitle !== undefined &&
+      targetAlnum.length >= 3 &&
+      alnumKey(symbol.objcTitle) === targetAlnum
+    ) {
+      renames.push(suggestion);
+    } else if (
       symbolParent === parentPath &&
       strippedLeaf.length >= 3 &&
       boundedEditDistance(strippedLeaf, symbolStripped, 2) <= 2
@@ -224,8 +233,7 @@ export async function resolvePathSuggestions(normalizedPath: string): Promise<Pa
   const topLevelFramework = normalizedPath.split("/")[0];
 
   try {
-    const indexNodes = await fetchFrameworkIndex(topLevelFramework);
-    const resolution = resolveFromIndexSymbols(normalizedPath, flattenFrameworkIndexNodes(indexNodes));
+    const resolution = resolveFromIndexSymbols(normalizedPath, await fetchFrameworkSymbols(topLevelFramework));
     if (resolution.autoResolvePath || resolution.suggestions.length > 0) {
       return resolution;
     }

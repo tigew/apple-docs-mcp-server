@@ -104,25 +104,35 @@ export function extractText(
     .trim();
 }
 
+/** The declaration a page leads with: the Swift one when it has one, otherwise its first. */
+function primaryDeclaration(sections: AppleDocPage["primaryContentSections"]) {
+  const declarations = sections?.find((s) => s.kind === "declarations")?.declarations;
+  if (!declarations?.length) return undefined;
+  return declarations.find((d) => d.languages?.includes("swift")) ?? declarations[0];
+}
+
 export function extractDeclaration(
   sections: AppleDocPage["primaryContentSections"]
 ): string {
-  if (!sections) return "";
+  const declaration = primaryDeclaration(sections);
+  if (!declaration?.tokens) return "";
 
-  const declarationSection = sections.find((s) => s.kind === "declarations");
-  if (!declarationSection?.declarations?.length) return "";
-
-  // Prefer Swift declaration
-  const swiftDecl =
-    declarationSection.declarations.find((d) => d.languages?.includes("swift")) ??
-    declarationSection.declarations[0];
-
-  if (!swiftDecl?.tokens) return "";
-
-  return swiftDecl.tokens
+  return declaration.tokens
     .map((token: AppleDocFragment) => token.text ?? "")
     .join("")
     .trim();
+}
+
+/**
+ * The language of the declaration extractDeclaration returns: "swift" or
+ * "objc". Undefined when there is no declaration, or it is in neither (the
+ * "data" pseudo-language of web-service objects, for one).
+ */
+export function extractDeclarationLanguage(sections: AppleDocPage["primaryContentSections"]): string | undefined {
+  const languages = primaryDeclaration(sections)?.languages ?? [];
+  if (languages.includes("swift")) return "swift";
+  if (languages.includes("occ")) return "objc";
+  return undefined;
 }
 
 /**

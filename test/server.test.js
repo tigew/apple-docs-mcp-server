@@ -143,3 +143,11 @@ test("apple_wwdc_get_session needs only a year, so it can list and search sessio
   assert.deepEqual(wwdc.inputSchema.required, ["year"]);
   assert.ok("query" in wwdc.inputSchema.properties);
 });
+
+test("apple_docs_get_page can be asked for the Objective-C version of a page", async () => {
+  const { tools } = await withServer((rpc) => rpc("tools/list", {}));
+  const getPage = tools.find((tool) => tool.name === "apple_docs_get_page");
+
+  assert.deepEqual(getPage.inputSchema.properties.language.enum, ["swift", "objc"]);
+  assert.equal(getPage.inputSchema.properties.language.default, "swift");
+});

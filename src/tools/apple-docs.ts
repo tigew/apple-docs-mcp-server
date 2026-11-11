@@ -17,6 +17,7 @@ import {
   parseTechnologies,
   searchFramework,
   searchGlobalSymbols,
+  selectLanguageVariant,
 } from "../services/apple-docs.js";
 import { offsetParam, registerReadTool, render, ResponseFormat, responseFormatParam } from "./shared.js";
 import { clampJsonResponse, clampTextResponse } from "./truncation.js";
@@ -120,6 +121,7 @@ Returns rich documentation including: abstract, Swift declaration, parameters, f
 
 Args:
   - path (string): The documentation path (everything after /documentation/ in the Apple docs URL). Case-insensitive.
+  - language ('swift' | 'objc'): Which version of the page to return (default: 'swift'). 'objc' gives the Objective-C names and declarations.
   - response_format ('markdown' | 'json'): Output format (default: 'markdown')
 
 Returns:
@@ -168,16 +170,27 @@ Error Handling:
           .describe(
             "The documentation path (everything after /documentation/ in the Apple docs URL). E.g.: 'swiftui', 'swiftui/view', 'swift/array', 'foundation/urlsession'"
           ),
+        language: z
+          .enum(["swift", "objc"])
+          .default("swift")
+          .describe("Which version of the page to return: 'swift' (default) or 'objc' for Objective-C names and declarations"),
         response_format: responseFormatParam,
         offset: offsetParam,
       },
     },
-    async ({ path, response_format, offset }) => {
+    async ({ path, language, response_format, offset }) => {
       const { page, redirectedFrom } = await fetchDocPageResolved(path);
-      const parsed = parseDocPage(page, path);
+      // Only an explicit request for Objective-C changes the page; pages that
+      // exist in a single language are otherwise returned as published.
+      const variant = language === "objc" ? selectLanguageVariant(page, "objc") : { page, available: true };
+      const parsed = parseDocPage(variant.page, path);
       return render(
         response_format,
-        redirectedFrom ? { redirectedFrom, ...parsed } : parsed,
+        {
+          ...(redirectedFrom ? { redirectedFrom } : {}),
+          ...(variant.available ? {} : { objcUnavailable: true }),
+          ...parsed,
+        },
         formatDocPageMarkdown,
         offset
       );
@@ -195,7 +208,7 @@ Error Handling:
       title: "Search Apple Documentation",
       description: `Search for symbols, articles, and topics within an Apple framework's documentation.
 
-Matches against the framework's complete symbol tree — every type, enum case, extension member, and nested member, not just what's listed on the framework's own root page — plus its curated root-page references and descriptions. Multi-word queries match if any query word appears in a symbol's name or path, ranked by how many words matched (so "deferred start capture session" finds AVCaptureSession's deferred-start members even though "capture session" only appears in the path). Because the search is complete, an empty result is good evidence the symbol doesn't exist under that name — not just that it wasn't indexed. This is useful for discovering APIs when you know the framework but not the exact symbol name.
+Matches against the framework's complete symbol tree — every type, enum case, extension member, and nested member, by Swift or Objective-C name, not just what's listed on the framework's own root page — plus its curated root-page references and descriptions. Multi-word queries match if any query word appears in a symbol's name or path, ranked by how many words matched (so "deferred start capture session" finds AVCaptureSession's deferred-start members even though "capture session" only appears in the path). Because the search covers both language trees, an empty result is good evidence the symbol doesn't exist under that name — not just that it wasn't indexed. This is useful for discovering APIs when you know the framework but not the exact symbol name.
 
 Args:
   - framework_path (string): The framework to search in (e.g. "swiftui", "foundation", "uikit")

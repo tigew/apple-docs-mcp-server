@@ -4,7 +4,7 @@
 
 import { AppleDocPage, SearchResult } from "../../types.js";
 import { extractOverview, extractText } from "./content.js";
-import { fetchFrameworkIndex, flattenFrameworkIndexNodes } from "./framework-index.js";
+import { FlattenedIndexSymbol, fetchFrameworkSymbols } from "./framework-index.js";
 import { fetchDocPage } from "./page.js";
 import { buildWebUrl, isDesignPath, isInFrameworkScope, normalizePath, pathFromDocUrl, stripLeafDisambiguation } from "./paths.js";
 
@@ -180,6 +180,35 @@ export function sortSearchResults(results: SearchResult[], query: string): Searc
 // Search: fetch a framework page and text-match through references
 // ---------------------------------------------------------------------------
 
+/**
+ * Match a framework's symbols against a query, by Swift name, path, or
+ * Objective-C name, within `normalizedFramework` (a framework or a path
+ * inside one). A result carries `objcTitle` only when the Objective-C name is
+ * the reason it matched.
+ */
+export function searchIndexSymbols(
+  symbols: FlattenedIndexSymbol[],
+  query: string,
+  normalizedFramework: string
+): SearchResult[] {
+  const results: SearchResult[] = [];
+  for (const symbol of symbols) {
+    if (!isInFrameworkScope(symbol.path, normalizedFramework)) continue;
+    const matchedSwiftName = matchesQuery(query, symbol.title, symbol.path);
+    if (!matchedSwiftName && !(symbol.objcTitle && matchesQuery(query, symbol.objcTitle))) continue;
+    results.push({
+      title: symbol.title,
+      path: symbol.path,
+      webUrl: buildWebUrl(symbol.path),
+      abstract: "",
+      kind: symbol.type,
+      role: symbol.type,
+      ...(!matchedSwiftName && symbol.objcTitle ? { objcTitle: symbol.objcTitle } : {}),
+    });
+  }
+  return results;
+}
+
 export async function searchFramework(
   frameworkPath: string,
   query: string,
@@ -218,20 +247,11 @@ export async function searchFramework(
   // symbol index" warning below would be misleading, so skip the tier entirely.
   if (!isDesignPath(normalizedFramework)) {
    try {
-    const indexNodes = await fetchFrameworkIndex(topLevelFramework);
-    for (const symbol of flattenFrameworkIndexNodes(indexNodes)) {
-      if (!isInFrameworkScope(symbol.path, normalizedFramework)) continue;
-      if (!matchesQuery(query, symbol.title, symbol.path)) continue;
-      const key = symbol.path.toLowerCase();
+    const symbols = await fetchFrameworkSymbols(topLevelFramework);
+    for (const result of searchIndexSymbols(symbols, query, normalizedFramework)) {
+      const key = result.path.toLowerCase();
       if (merged.has(key)) continue; // tier-1 already has a result here with a real abstract
-      merged.set(key, {
-        title: symbol.title,
-        path: symbol.path,
-        webUrl: buildWebUrl(symbol.path),
-        abstract: "",
-        kind: symbol.type,
-        role: symbol.type,
-      });
+      merged.set(key, result);
     }
    } catch {
     indexFetchFailed = true;

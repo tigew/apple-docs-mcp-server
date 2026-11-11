@@ -11,12 +11,9 @@ import { pathFromDocUrl } from "./paths.js";
 
 // Framework navigator-index payloads are much larger (up to several MB) than
 // a single doc page, hence the longer TTL (they change less often) and much
-// smaller capacity.
-export const indexCache = createTtlCache<AppleDocIndexNode[]>(15 * 60 * 1000, 15);
-
-export const getCachedIndex = (topLevelFramework: string) => indexCache.get(topLevelFramework);
-
-export const setCachedIndex = (topLevelFramework: string, nodes: AppleDocIndexNode[]) => indexCache.set(topLevelFramework, nodes);
+// smaller capacity. The flattened symbol list is what gets cached, so the tree
+// is walked once per fetch rather than once per search.
+const symbolCache = createTtlCache<FlattenedIndexSymbol[]>(15 * 60 * 1000, 15);
 
 // ---------------------------------------------------------------------------
 // Framework navigator index — the full recursive symbol tree that powers the
@@ -27,24 +24,32 @@ export const setCachedIndex = (topLevelFramework: string, nodes: AppleDocIndexNo
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch and cache the full symbol-tree index for a top-level framework
- * (e.g. "avfoundation"). Throws on network/format errors — callers should
- * treat this as a best-effort search tier and fall back gracefully.
+ * Fetch and cache every symbol in a top-level framework (e.g. "avfoundation"),
+ * across its Swift and Objective-C trees. Throws on network/format errors —
+ * callers should treat this as a best-effort search tier and fall back
+ * gracefully.
  */
-export async function fetchFrameworkIndex(topLevelFramework: string): Promise<AppleDocIndexNode[]> {
-  const cached = getCachedIndex(topLevelFramework);
+export async function fetchFrameworkSymbols(topLevelFramework: string): Promise<FlattenedIndexSymbol[]> {
+  const cached = symbolCache.get(topLevelFramework);
   if (cached) return cached;
 
-  const nodes = await loadFrameworkIndexNodes(topLevelFramework, (url) =>
+  const trees = await loadFrameworkIndexNodes(topLevelFramework, (url) =>
     fetchDocsJson<unknown>(url, FRAMEWORK_INDEX_MAX_BYTES)
   );
+  const symbols = mergeFrameworkIndexSymbols(trees);
 
-  setCachedIndex(topLevelFramework, nodes);
-  return nodes;
+  symbolCache.set(topLevelFramework, symbols);
+  return symbols;
+}
+
+/** A framework's navigator index: one symbol tree per language. */
+export interface FrameworkIndexTrees {
+  swift: AppleDocIndexNode[];
+  objc: AppleDocIndexNode[];
 }
 
 /**
- * Load a framework's navigator-index nodes through `get`, an HTTP GET that
+ * Load a framework's navigator-index trees through `get`, an HTTP GET that
  * resolves to the parsed response body and rejects with an AxiosError on a
  * non-2xx status. Split from the caching wrapper above so the URL handling can
  * be tested without the network.
@@ -52,7 +57,7 @@ export async function fetchFrameworkIndex(topLevelFramework: string): Promise<Ap
 export async function loadFrameworkIndexNodes(
   topLevelFramework: string,
   get: (url: string) => Promise<unknown>
-): Promise<AppleDocIndexNode[]> {
+): Promise<FrameworkIndexTrees> {
   // Apple has served this file both with and without a `.json` suffix (the
   // suffixed form began returning 404 in 2026). Try the current form first and
   // fall back only on a 404 — any other failure (timeout, 5xx) is surfaced
@@ -70,15 +75,38 @@ export async function loadFrameworkIndexNodes(
   }
 
   const languages = data.interfaceLanguages ?? {};
-  const swiftNodes = Array.isArray(languages.swift) ? languages.swift : [];
-  const occNodes = Array.isArray(languages.occ) ? languages.occ : [];
-  return swiftNodes.length ? swiftNodes : occNodes;
+  return {
+    swift: Array.isArray(languages.swift) ? languages.swift : [],
+    objc: Array.isArray(languages.occ) ? languages.occ : [],
+  };
 }
 
 export interface FlattenedIndexSymbol {
   title: string;
   path: string;
   type: string;
+  /** The symbol's name in the Objective-C tree, when it has one that differs from `title`. */
+  objcTitle?: string;
+}
+
+/**
+ * Combine the two language trees into one list of symbols, one entry per
+ * path. Most Objective-C symbols share a page with their Swift counterpart and
+ * differ only in name ("func draw(CGRect)" is "- drawRect:"), so the
+ * Objective-C name is recorded on the shared entry; symbols that exist only in
+ * the Objective-C tree are added as entries of their own.
+ */
+export function mergeFrameworkIndexSymbols(trees: FrameworkIndexTrees): FlattenedIndexSymbol[] {
+  const byPath = new Map<string, FlattenedIndexSymbol>();
+  for (const symbol of flattenFrameworkIndexNodes(trees.swift)) {
+    if (!byPath.has(symbol.path)) byPath.set(symbol.path, symbol);
+  }
+  for (const objc of flattenFrameworkIndexNodes(trees.objc)) {
+    const shared = byPath.get(objc.path);
+    if (!shared) byPath.set(objc.path, objc);
+    else if (shared.objcTitle === undefined && objc.title !== shared.title) shared.objcTitle = objc.title;
+  }
+  return [...byPath.values()];
 }
 
 /**

@@ -10,11 +10,13 @@
 
 export { extractDeclaration, extractOverview, extractParameters, extractText } from "./docs/content.js";
 export { formatDocPageMarkdown, formatGlobalSearchResultsMarkdown, formatSearchResultsMarkdown, formatTechnologiesMarkdown } from "./docs/format.js";
-export { flattenFrameworkIndexNodes, loadFrameworkIndexNodes } from "./docs/framework-index.js";
-export type { FlattenedIndexSymbol } from "./docs/framework-index.js";
+export { flattenFrameworkIndexNodes, loadFrameworkIndexNodes, mergeFrameworkIndexSymbols } from "./docs/framework-index.js";
+export type { FlattenedIndexSymbol, FrameworkIndexTrees } from "./docs/framework-index.js";
 export { assembleSearchStream, parseGlobalSearchResponse, searchGlobalSymbols } from "./docs/global-search.js";
 export { fetchDocPage, fetchDocPageResolved } from "./docs/page.js";
 export { parseDocPage, parseTechnologies } from "./docs/parse.js";
 export { normalizePath } from "./docs/paths.js";
 export { boundedEditDistance, resolveChildPathFromParentPage, resolveFromIndexSymbols } from "./docs/resolve.js";
-export { dedupeSearchResults, searchFramework, searchReferencesInPage } from "./docs/search.js";
+export { dedupeSearchResults, searchFramework, searchIndexSymbols, searchReferencesInPage } from "./docs/search.js";
+export { applyJsonPatch, selectLanguageVariant } from "./docs/variants.js";
+export type { DocLanguage } from "./docs/variants.js";

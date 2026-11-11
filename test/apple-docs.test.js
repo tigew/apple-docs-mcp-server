@@ -1614,9 +1614,11 @@ test("loadFrameworkIndexNodes reads the index from the suffix-less URL Apple ser
 
   const nodes = await loadFrameworkIndexNodes("avfoundation", transport.get);
 
-  assert.equal(nodes.length, 1);
-  assert.equal(nodes[0].title, "AVCaptureSession");
-  assert.equal(nodes[0].children[0].title, "var automaticallyRunsDeferredStart: Bool");
+  assert.equal(nodes.swift.length, 1);
+  assert.equal(nodes.swift[0].title, "AVCaptureSession");
+  assert.equal(nodes.swift[0].children[0].title, "var automaticallyRunsDeferredStart: Bool");
+  // The Objective-C tree is returned alongside it, not discarded.
+  assert.equal(nodes.objc[0].title, "AVCaptureSession");
 });
 
 test("loadFrameworkIndexNodes falls back to the legacy .json URL when the suffix-less one 404s", async () => {
@@ -1624,7 +1626,7 @@ test("loadFrameworkIndexNodes falls back to the legacy .json URL when the suffix
 
   const nodes = await loadFrameworkIndexNodes("avfoundation", transport.get);
 
-  assert.equal(nodes[0].title, "AVCaptureSession");
+  assert.equal(nodes.swift[0].title, "AVCaptureSession");
   assert.deepEqual(transport.requested, [`${INDEX_BASE}/avfoundation`, `${INDEX_BASE}/avfoundation.json`]);
 });
 

@@ -202,6 +202,13 @@ export interface AppleDocGroup {
   identifiers?: string[];
   technologies?: AppleDocTechnologyEntry[];
 }
+/** One operation of a JSON Patch (RFC 6902). */
+export interface JsonPatchOperation {
+  op: string;
+  path: string;
+  value?: unknown;
+}
+
 export interface AppleDocPage {
   identifier?: AppleDocIdentifier;
   kind?: string;
@@ -214,6 +221,8 @@ export interface AppleDocPage {
   references?: Record<string, AppleDocReference>;
   hierarchy?: AppleDocHierarchy;
   variants?: Array<{ traits: Array<{ interfaceLanguage: string }>; paths: string[] }>;
+  /** Other-language renditions of this page, each a JSON Patch over this document. */
+  variantOverrides?: Array<{ traits?: Array<{ interfaceLanguage?: string }>; patch?: JsonPatchOperation[] }>;
   sections?: AppleDocSection[];
   schemaVersion?: { major: number; minor: number; patch: number };
 }
@@ -274,6 +283,10 @@ export interface ParsedSymbol extends ParsedRestSections {
   module?: string;
   abstract: string;
   declaration?: string;
+  /** Language of `declaration`: "swift" or "objc". Absent for declarations in neither (e.g. web-service objects). */
+  declarationLanguage?: string;
+  /** Set when the Objective-C version was asked for and this page has none. */
+  objcUnavailable?: boolean;
   parameters?: Array<{ name: string; description: string }>;
   platforms: AppleDocPlatform[];
   deprecated?: boolean;
@@ -331,6 +344,8 @@ export interface SearchResult {
   abstract: string;
   kind: string;
   role: string;
+  /** The symbol's Objective-C name, when that name is what the query matched. */
+  objcTitle?: string;
 }
 
 /** One hit from Apple's global (cross-framework) search API. */

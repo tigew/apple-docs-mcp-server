@@ -147,6 +147,29 @@ apple_docs_find_symbol(query="WidgetRelevance")   → WidgetKit
 ```
 Types often appear in one framework's signatures but are defined in another (e.g. `RelevantContext` shows up in WidgetKit APIs but lives in RelevanceKit).
 
+### Web-service (REST) reference pages
+
+Endpoint, object, and enumeration pages render their full reference data, not just the summary:
+
+```
+apple_docs_get_page(path="appstoreconnectapi/get-v1-apps")   → method and URL, query parameters, response codes, example
+apple_docs_get_page(path="appstoreconnectapi/app")           → the object's properties and their types
+apple_docs_get_page(path="appstoreconnectapi/platform")      → the possible values
+```
+
+### Objective-C
+
+```
+apple_docs_get_page(path="uikit/uiview/addsubview(_:)", language="objc")   → "- (void) addSubview:(UIView *) view;"
+apple_docs_search(framework_path="uikit", query="drawRect")                → finds draw(_:), shown with its Objective-C name
+```
+
+Search covers both the Swift and Objective-C symbol trees, and an Objective-C selector used as a path (`uikit/uiview/drawrect:`) resolves to the page it shares with the Swift method.
+
+### Reading long responses
+
+A response too long to return at once ends with a note such as `Call again with offset=24663 to continue`. Pass that `offset` back to the same tool, with the same arguments, to get the next part — this is how a full WWDC transcript or a long article is read to the end. JSON responses page the same way (`next_offset`).
+
 ### Forgiving path resolution
 
 `apple_docs_get_page` recovers from imperfect paths instead of returning a bare 404:
@@ -155,6 +178,8 @@ Types often appear in one framework's signatures but are defined in another (e.g
 - **Legacy/renamed types** — `cloudkit/cksharemetadata` auto-resolves to `cloudkit/ckshare/metadata` (`CKShare.Metadata`)
 - **Bare member names** — `swiftui/view/onappear` auto-resolves to `swiftui/view/onappear(perform:)`; if the name has *multiple* overloads (e.g. `appintents/intentresult/result`), the error lists every overload with its full declaration and disambiguation-suffixed path
 - **Typos** — `…/relevances()` returns a "did you mean" list including `…/relevance()`
+
+Whenever a different page is returned than the one asked for, the response opens with a note naming both paths.
 
 ### Discover path conventions
 

@@ -3,7 +3,13 @@
  */
 
 import { AppleDocGroup, AppleDocPage, AppleDocReference, AppleDocSection, AppleDocTechnologyEntry, ParsedSymbol, ParsedTechnologies } from "../../types.js";
-import { extractText, extractDeclaration, extractOverview, extractParameters } from "./content.js";
+import {
+  extractDeclaration,
+  extractDeclarationLanguage,
+  extractOverview,
+  extractParameters,
+  extractText,
+} from "./content.js";
 import { extractRestSections } from "./rest.js";
 import { buildWebUrl, normalizeDocUrl, normalizePath, pathFromDocUrl } from "./paths.js";
 
@@ -203,6 +209,7 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
     module: moduleName || undefined,
     abstract,
     declaration: declaration || undefined,
+    declarationLanguage: declaration ? extractDeclarationLanguage(page.primaryContentSections) : undefined,
     parameters,
     platforms,
     deprecated: deprecation.deprecated || undefined,

@@ -91,3 +91,6 @@ export const DEV_MARKETING_ORIGIN = "https://developer.apple.com";
 // Legacy Technical Q&A archive — static server-rendered HTML at qa{NNNN}/_index.html.
 export const LEGACY_QA_HOST = "developer.apple.com";
 export const LEGACY_QA_BASE = "https://developer.apple.com/library/archive/qa";
+
+// Guard against runaway recursion when walking Apple's nested content and index trees.
+export const MAX_RECURSION_DEPTH = 40;

@@ -3,7 +3,13 @@
  * canonical paths to Apple's JSON endpoints and public web URLs.
  */
 
-import { APPLE_DESIGN_PATH_PREFIX, APPLE_DEV_ORIGIN, APPLE_DOCS_BASE_URL, APPLE_DOCS_WEB_BASE } from "../../constants.js";
+import {
+  APPLE_DESIGN_PATH_PREFIX,
+  APPLE_DEV_ORIGIN,
+  APPLE_DOCS_BASE_URL,
+  APPLE_DOCS_WEB_BASE,
+  APPLE_TUTORIALS_PATH_PREFIX,
+} from "../../constants.js";
 
 export function stripDocPrefix(url: string): string {
   return url
@@ -13,7 +19,8 @@ export function stripDocPrefix(url: string): string {
     .replace(/^https?:\/\/developer\.apple\.com(?=\/|$)/i, "")
     .replace(/^\/+/, "")
     // Only the `documentation/` tree is dropped from the canonical path; the
-    // `design/` tree is retained (it's how fetch routing recognizes HIG pages).
+    // `design/` and `tutorials/` trees are retained (it's how fetch routing
+    // recognizes those pages).
     .replace(/^documentation\//i, "");
 }
 
@@ -22,24 +29,40 @@ export function isDesignPath(normalizedPath: string): boolean {
   return normalizedPath === "design" || normalizedPath.startsWith(APPLE_DESIGN_PATH_PREFIX);
 }
 
+/** True for tutorial paths, which live under a `tutorials/` tree. */
+export function isTutorialPath(normalizedPath: string): boolean {
+  return normalizedPath === "tutorials" || normalizedPath.startsWith(APPLE_TUTORIALS_PATH_PREFIX);
+}
+
+/**
+ * True for paths outside the `documentation/` tree (design guidance and
+ * tutorials). Their canonical path carries its tree as a prefix, and they have
+ * no per-framework symbol index.
+ */
+export function hasOwnTree(normalizedPath: string): boolean {
+  return isDesignPath(normalizedPath) || isTutorialPath(normalizedPath);
+}
+
 /**
  * Map a canonical internal path to its DocC render-JSON endpoint. Framework docs
  * live under `…/data/documentation/{path}.json`; Design guidance (HIG, SF
- * Symbols) is the same render API but under `…/data/design/{path}.json`, and the
- * canonical path already carries the `design/` prefix — so it maps straight
- * through without a `documentation/` segment.
+ * Symbols) and tutorials are the same render API but under
+ * `…/data/design/{path}.json` and `…/data/tutorials/{path}.json`, and their
+ * canonical paths already carry that prefix — so they map straight through
+ * without a `documentation/` segment.
  */
 export function docJsonUrl(normalizedPath: string): string {
-  if (isDesignPath(normalizedPath)) {
+  if (hasOwnTree(normalizedPath)) {
     return `${APPLE_DOCS_BASE_URL}/${normalizedPath}.json`;
   }
   return `${APPLE_DOCS_BASE_URL}/documentation/${normalizedPath}.json`;
 }
 
 export function buildWebUrl(path: string): string {
-  // Design pages 404 under /documentation/ on the live site — their public URL
-  // is developer.apple.com/design/… (matching the canonical path directly).
-  if (isDesignPath(path)) {
+  // Design and tutorial pages 404 under /documentation/ on the live site —
+  // their public URLs are developer.apple.com/design/… and …/tutorials/…
+  // (matching the canonical path directly).
+  if (hasOwnTree(path)) {
     return `${APPLE_DEV_ORIGIN}/${path}`;
   }
   return `${APPLE_DOCS_WEB_BASE}/${path}`;
@@ -74,8 +97,8 @@ export function pathFromDocUrl(url: string | undefined): string | null {
 export function normalizeDocUrl(url: string): string {
   const internalPath = pathFromDocUrl(url);
   if (!internalPath) return url;
-  // Design paths keep their own tree; only framework docs get a /documentation/ prefix.
-  if (isDesignPath(internalPath)) return `/${internalPath}`;
+  // Design and tutorial paths keep their own tree; only framework docs get a /documentation/ prefix.
+  if (hasOwnTree(internalPath)) return `/${internalPath}`;
   return `/documentation/${internalPath}`;
 }
 

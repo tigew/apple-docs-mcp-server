@@ -11,6 +11,10 @@ export const APPLE_DOCS_WEB_BASE = "https://developer.apple.com/documentation";
 // differ from the documentation tree. Paths in this tree keep their `design/`
 // prefix as their canonical internal path.
 export const APPLE_DESIGN_PATH_PREFIX = "design/";
+// Tutorials are a third tree served by the same render API
+// (…/data/tutorials/{path}.json, developer.apple.com/tutorials/…), and like
+// design paths they keep their prefix as part of the canonical path.
+export const APPLE_TUTORIALS_PATH_PREFIX = "tutorials/";
 // Global cross-framework search — the same API the developer.apple.com search
 // page calls (POST {text, targetResultLocale, includedResponses}), answering
 // with a JSON Lines stream of diffs. Unofficial, like the docs API. (The

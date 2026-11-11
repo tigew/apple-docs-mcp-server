@@ -13,7 +13,7 @@ An MCP (Model Context Protocol) server that gives Claude and other LLMs direct a
 | Tool | Description |
 |------|-------------|
 | `apple_docs_list_technologies` | List all Apple frameworks grouped by category |
-| `apple_docs_get_page` | Get documentation for any framework, symbol, article, or **HIG / SF Symbols design** page |
+| `apple_docs_get_page` | Get documentation for any framework, symbol, article, **HIG / SF Symbols design** page, or **tutorial** |
 | `apple_docs_search` | Search within a framework by keyword |
 | `apple_docs_find_symbol` | Find a symbol across **all** frameworks (when you don't know which framework defines it) |
 | `apple_docs_get_symbol_raw` | Fetch raw JSON from Apple's documentation API |
@@ -146,6 +146,15 @@ apple_docs_find_symbol(query="RelevantContext")   → RelevanceKit
 apple_docs_find_symbol(query="WidgetRelevance")   → WidgetKit
 ```
 Types often appear in one framework's signatures but are defined in another (e.g. `RelevantContext` shows up in WidgetKit APIs but lives in RelevanceKit).
+
+### Tutorials
+
+```
+apple_docs_get_page(path="tutorials/develop-in-swift")                        → the chapters and the tutorials in each
+apple_docs_get_page(path="tutorials/swiftui/creating-and-combining-views")    → every section's steps, with the code
+```
+
+A source file is shown whole the first time a tutorial uses it; later steps show only the lines that changed.
 
 ### Web-service (REST) reference pages
 

@@ -11,6 +11,7 @@ import {
   extractText,
 } from "./content.js";
 import { extractRestSections } from "./rest.js";
+import { extractTutorialContent } from "./tutorials.js";
 import { buildWebUrl, normalizeDocUrl, normalizePath, pathFromDocUrl } from "./paths.js";
 
 export function resolveReferenceItems(
@@ -111,7 +112,8 @@ export function extractBreadcrumb(
       }
       return references[id].title ?? id.split("/").pop() ?? id;
     })
-    .filter((c) => c && c !== "Technologies");
+    // "$volume" is a placeholder Apple puts in tutorial hierarchies for an unnamed volume.
+    .filter((c) => c && c !== "Technologies" && !c.startsWith("$"));
 
   return crumbs.length > 0 ? crumbs : undefined;
 }
@@ -217,6 +219,8 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
   }));
 
   const webUrl = buildWebUrl(canonicalPath);
+  // Tutorials have a hero and tasks rather than content sections.
+  const tutorial = extractTutorialContent(page);
   const sampleCodeDownloadUrl = extractSampleCodeDownloadUrl(page);
 
   const moduleName = meta.modules?.[0]?.name;
@@ -225,10 +229,10 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
     title,
     kind,
     role,
-    roleHeading: meta.roleHeading || undefined,
+    roleHeading: meta.roleHeading || tutorial?.roleHeading || undefined,
     symbolKind: meta.symbolKind || undefined,
     module: moduleName || undefined,
-    abstract,
+    abstract: abstract || tutorial?.abstract || "",
     declaration: declaration || undefined,
     declarationLanguage: declaration ? extractDeclarationLanguage(page.primaryContentSections) : undefined,
     parameters,
@@ -242,7 +246,7 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
     topicSections,
     relationships,
     seeAlsoSections,
-    overview,
+    overview: tutorial ? tutorial.overview : overview,
     ...extractRestSections(page),
     ...(sampleCodeDownloadUrl ? { sampleCodeDownloadUrl } : {}),
   };

@@ -6,7 +6,7 @@ import { AppleDocPage, SearchResult } from "../../types.js";
 import { extractOverview, extractText } from "./content.js";
 import { FlattenedIndexSymbol, fetchFrameworkSymbols } from "./framework-index.js";
 import { fetchDocPage } from "./page.js";
-import { buildWebUrl, isDesignPath, isInFrameworkScope, normalizePath, pathFromDocUrl, stripLeafDisambiguation } from "./paths.js";
+import { buildWebUrl, hasOwnTree, isInFrameworkScope, normalizePath, pathFromDocUrl, stripLeafDisambiguation } from "./paths.js";
 
 export function searchTextForPage(page: AppleDocPage): string {
   return [
@@ -270,12 +270,12 @@ export async function searchFramework(
   const normalizedFramework = normalizePath(frameworkPath);
   const topLevelFramework = normalizedFramework.split("/")[0];
   let indexFetchFailed = false;
-  // Apple Design (HIG / SF Symbols) has no per-framework navigator index — the
+  // Design guidance and tutorials have no per-framework navigator index — the
   // `index/design.json` endpoint 404s and `index/human-interface-guidelines.json`
   // is empty — so there's no second tier to fetch. Searching its root page's own
   // topic references is the complete picture, and emitting the "couldn't load the
   // symbol index" warning below would be misleading, so skip the tier entirely.
-  if (!isDesignPath(normalizedFramework)) {
+  if (!hasOwnTree(normalizedFramework)) {
    try {
     const symbols = await fetchFrameworkSymbols(topLevelFramework);
     for (const result of searchIndexSymbols(symbols, query, normalizedFramework)) {

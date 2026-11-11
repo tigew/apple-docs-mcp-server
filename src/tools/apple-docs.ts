@@ -116,6 +116,7 @@ The path corresponds to the URL path at developer.apple.com/documentation/{path}
   - Symbol/type:        "swiftui/view", "swift/array", "uikit/uitableview"
   - Article:           "swiftui/declaring-a-custom-view"
   - Nested symbol:     "swiftui/view/body-swift.property"
+  - Tutorial:          "tutorials/swiftui" (a collection), "tutorials/swiftui/creating-and-combining-views" (its steps and code)
 
 Returns rich documentation including: abstract, Swift declaration, parameters, full documentation prose, topic sections (with child symbol paths you can pass directly to this tool), platform availability, deprecation status, hierarchy breadcrumb, and relationship info (inheritance, conformances).
 

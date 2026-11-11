@@ -252,8 +252,8 @@ test("parseDocPage and markdown formatting remain bounded on large section paylo
 
   assert.equal(parsed.path, "testkit");
   assert.match(markdown, /\# TestKit/);
-  assert.match(markdown, /\(20 more items\.\.\.\)/);
-  assert.match(markdown, /\(25 more\.\.\.\)/);
+  assert.match(markdown, /\(20 more items — request response_format "json" for the full list/);
+  assert.match(markdown, /\(25 more — request response_format "json" for the full list\)/);
   assert.ok(markdown.length > 1000);
 });
 
@@ -439,9 +439,9 @@ test("formatDocPageMarkdown renders explicit caps for section sizes", () => {
   };
 
   const markdown = formatDocPageMarkdown(parsed);
-  assert.match(markdown, /\(1 more items\.\.\.\)/);
-  assert.match(markdown, /\(1 more\.\.\.\)/);
-  assert.match(markdown, /\(2 more items\.\.\.\)/);
+  assert.match(markdown, /\(1 more items — request response_format "json" for the full list/);
+  assert.match(markdown, /\(1 more — request response_format "json" for the full list\)/);
+  assert.match(markdown, /\(2 more items — request response_format "json" for the full list/);
 });
 
 // =========================================================================

@@ -221,6 +221,8 @@ export interface AppleDocPage {
   references?: Record<string, AppleDocReference>;
   hierarchy?: AppleDocHierarchy;
   variants?: Array<{ traits: Array<{ interfaceLanguage: string }>; paths: string[] }>;
+  /** On sample-code pages: a reference to the downloadable project. */
+  sampleCodeDownload?: { action?: { identifier?: string } };
   /** Other-language renditions of this page, each a JSON Patch over this document. */
   variantOverrides?: Array<{ traits?: Array<{ interfaceLanguage?: string }>; patch?: JsonPatchOperation[] }>;
   sections?: AppleDocSection[];
@@ -287,6 +289,8 @@ export interface ParsedSymbol extends ParsedRestSections {
   declarationLanguage?: string;
   /** Set when the Objective-C version was asked for and this page has none. */
   objcUnavailable?: boolean;
+  /** Where to download the project, on a sample-code page. */
+  sampleCodeDownloadUrl?: string;
   parameters?: Array<{ name: string; description: string }>;
   platforms: AppleDocPlatform[];
   deprecated?: boolean;
@@ -346,6 +350,8 @@ export interface SearchResult {
   role: string;
   /** The symbol's Objective-C name, when that name is what the query matched. */
   objcTitle?: string;
+  beta?: boolean;
+  deprecated?: boolean;
 }
 
 /** One hit from Apple's global (cross-framework) search API. */

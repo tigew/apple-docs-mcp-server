@@ -180,6 +180,34 @@ export function sortSearchResults(results: SearchResult[], query: string): Searc
 // Search: fetch a framework page and text-match through references
 // ---------------------------------------------------------------------------
 
+// Symbols found only through the index come with no description. The first
+// few results get theirs looked up (one page fetch each, in parallel, cached);
+// more than a few would slow every search for results rarely read.
+const MAX_ABSTRACT_LOOKUPS = 5;
+
+/**
+ * Fill in the abstract of the first `max` results that have none, using
+ * `lookUp` (path → abstract). A lookup that fails leaves its result as it
+ * was: a missing description must not fail a search.
+ */
+export async function fillMissingAbstracts(
+  results: SearchResult[],
+  lookUp: (path: string) => Promise<string>,
+  max: number
+): Promise<SearchResult[]> {
+  const missing = results.filter((result) => !result.abstract && result.path).slice(0, max);
+  await Promise.all(
+    missing.map(async (result) => {
+      try {
+        result.abstract = await lookUp(result.path);
+      } catch {
+        // leave it without a description
+      }
+    })
+  );
+  return results;
+}
+
 /**
  * Match a framework's symbols against a query, by Swift name, path, or
  * Objective-C name, within `normalizedFramework` (a framework or a path
@@ -204,6 +232,8 @@ export function searchIndexSymbols(
       kind: symbol.type,
       role: symbol.type,
       ...(!matchedSwiftName && symbol.objcTitle ? { objcTitle: symbol.objcTitle } : {}),
+      ...(symbol.beta ? { beta: true } : {}),
+      ...(symbol.deprecated ? { deprecated: true } : {}),
     });
   }
   return results;
@@ -250,8 +280,15 @@ export async function searchFramework(
     const symbols = await fetchFrameworkSymbols(topLevelFramework);
     for (const result of searchIndexSymbols(symbols, query, normalizedFramework)) {
       const key = result.path.toLowerCase();
-      if (merged.has(key)) continue; // tier-1 already has a result here with a real abstract
-      merged.set(key, result);
+      const curated = merged.get(key);
+      if (!curated) {
+        merged.set(key, result);
+      } else {
+        // Tier 1 already has this symbol, with a real abstract; the index adds
+        // what the root page's references do not say.
+        if (result.beta) curated.beta = true;
+        if (result.deprecated) curated.deprecated = true;
+      }
     }
    } catch {
     indexFetchFailed = true;
@@ -260,7 +297,11 @@ export async function searchFramework(
 
   // Reserve one slot for the warning so we don't exceed the caller's limit
   const resultLimit = indexFetchFailed ? Math.max(limit - 1, 0) : limit;
-  const results = sortSearchResults(dedupeSearchResults(Array.from(merged.values())), query).slice(0, resultLimit);
+  const results = await fillMissingAbstracts(
+    sortSearchResults(dedupeSearchResults(Array.from(merged.values())), query).slice(0, resultLimit),
+    async (path) => extractText((await fetchDocPage(path)).abstract, undefined),
+    MAX_ABSTRACT_LOOKUPS
+  );
 
   if (indexFetchFailed) {
     results.unshift({

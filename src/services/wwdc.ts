@@ -214,7 +214,9 @@ export function formatWwdcSessionMarkdown(session: WwdcSession): string {
     for (const sample of session.sampleCode) {
       const heading = [sample.time ? `\`${sample.time}\`` : "", sample.title].filter(Boolean).join(" ");
       lines.push(`### ${heading}`);
-      lines.push("```swift");
+      // The page does not say what language a sample is in, and many are shell
+      // commands or C++, so the fence carries no language rather than a wrong one.
+      lines.push("```");
       lines.push(sample.code);
       lines.push("```");
       lines.push("");

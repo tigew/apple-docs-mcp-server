@@ -7,6 +7,8 @@ import { GlobalSearchResult, ParsedField, ParsedSymbol, ParsedTechnologies, Sear
 // Markdown shows a readable sample of long lists; the JSON format keeps every entry.
 const MAX_ALLOWED_VALUES_SHOWN = 10;
 const MAX_MENTIONS_SHOWN = 10;
+// Appended wherever markdown cuts a list short, so the cut is never a dead end.
+const FULL_LIST_HINT = 'request response_format "json" for the full list';
 
 /** `\`Type\` (path: \`a/b\`)`, or just the type when it has no documentation page. */
 function formatType(typed: { type?: string; typePath?: string }): string {
@@ -76,6 +78,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
   }
 
   lines.push(`**URL**: ${parsed.webUrl}`);
+  if (parsed.sampleCodeDownloadUrl) lines.push(`**Sample code**: [Download](${parsed.sampleCodeDownloadUrl})`);
 
   if (parsed.platforms.length > 0) {
     const platformStr = parsed.platforms
@@ -166,7 +169,8 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
   if (parsed.parameters?.length) {
     lines.push(`## Parameters`);
     for (const param of parsed.parameters) {
-      const desc = param.description ? ` — ${param.description}` : "";
+      // Continuation lines (a list or code in the description) sit under the parameter.
+      const desc = param.description ? ` — ${param.description.replace(/\n/g, "\n  ")}` : "";
       lines.push(`- **\`${param.name}\`**${desc}`);
     }
     lines.push("");
@@ -184,7 +188,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
       lines.push(`- **${item.title}** (path: \`${item.path}\`)`);
     }
     if (parsed.mentionedIn.length > MAX_MENTIONS_SHOWN) {
-      lines.push(`- *(${parsed.mentionedIn.length - MAX_MENTIONS_SHOWN} more...)*`);
+      lines.push(`- *(${parsed.mentionedIn.length - MAX_MENTIONS_SHOWN} more — ${FULL_LIST_HINT})*`);
     }
     lines.push("");
   }
@@ -199,7 +203,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
         lines.push(`- **${item.title}** (path: \`${item.path}\`)${abstract}`);
       }
       if (section.items.length > 20) {
-        lines.push(`- *(${section.items.length - 20} more items...)*`);
+        lines.push(`- *(${section.items.length - 20} more items — ${FULL_LIST_HINT}, or use apple_docs_search to find one)*`);
       }
     }
     lines.push("");
@@ -213,7 +217,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
         lines.push(`- ${item.title} (path: \`${item.path}\`)`);
       }
       if (rel.items.length > 15) {
-        lines.push(`- *(${rel.items.length - 15} more...)*`);
+        lines.push(`- *(${rel.items.length - 15} more — ${FULL_LIST_HINT})*`);
       }
     }
     lines.push("");
@@ -229,7 +233,7 @@ export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
         lines.push(`- **${item.title}** (path: \`${item.path}\`)${abstract}`);
       }
       if (section.items.length > 20) {
-        lines.push(`- *(${section.items.length - 20} more items...)*`);
+        lines.push(`- *(${section.items.length - 20} more items — ${FULL_LIST_HINT}, or use apple_docs_search to find one)*`);
       }
     }
   }
@@ -321,6 +325,8 @@ export function formatSearchResultsMarkdown(
 
   for (const result of results) {
     lines.push(`## ${result.title}`);
+    const status = [result.beta ? "Beta" : "", result.deprecated ? "Deprecated" : ""].filter(Boolean);
+    if (status.length) lines.push(`**Status**: ${status.join(", ")}`);
     if (result.objcTitle) lines.push(`**Objective-C name**: \`${result.objcTitle}\``);
     lines.push(`**Path**: \`${result.path}\` | **Kind**: ${result.kind} | **Role**: ${result.role}`);
     lines.push(`**URL**: ${result.webUrl}`);

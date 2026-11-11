@@ -17,6 +17,12 @@ export { fetchDocPage, fetchDocPageResolved } from "./docs/page.js";
 export { parseDocPage, parseTechnologies } from "./docs/parse.js";
 export { normalizePath } from "./docs/paths.js";
 export { boundedEditDistance, resolveChildPathFromParentPage, resolveFromIndexSymbols } from "./docs/resolve.js";
-export { dedupeSearchResults, searchFramework, searchIndexSymbols, searchReferencesInPage } from "./docs/search.js";
+export {
+  dedupeSearchResults,
+  fillMissingAbstracts,
+  searchFramework,
+  searchIndexSymbols,
+  searchReferencesInPage,
+} from "./docs/search.js";
 export { applyJsonPatch, selectLanguageVariant } from "./docs/variants.js";
 export type { DocLanguage } from "./docs/variants.js";

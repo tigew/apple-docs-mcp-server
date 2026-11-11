@@ -90,6 +90,8 @@ export interface FlattenedIndexSymbol {
   type: string;
   /** The symbol's name in the Objective-C tree, when it has one that differs from `title`. */
   objcTitle?: string;
+  beta?: boolean;
+  deprecated?: boolean;
 }
 
 /**
@@ -124,7 +126,13 @@ export function flattenFrameworkIndexNodes(nodes: AppleDocIndexNode[]): Flattene
     if (!node.external && node.path) {
       const normalizedPath = pathFromDocUrl(node.path);
       if (normalizedPath) {
-        out.push({ title: node.title ?? normalizedPath, path: normalizedPath, type: node.type ?? "unknown" });
+        out.push({
+          title: node.title ?? normalizedPath,
+          path: normalizedPath,
+          type: node.type ?? "unknown",
+          ...(node.beta ? { beta: true } : {}),
+          ...(node.deprecated ? { deprecated: true } : {}),
+        });
       }
     }
     for (const child of node.children ?? []) {

@@ -299,6 +299,22 @@ export function extractOverview(
   return lines.join("\n").trim();
 }
 
+/**
+ * A parameter's description as markdown: usually one paragraph, but lists,
+ * code, and notes are kept rather than dropped. One line per block.
+ */
+function renderParameterDescription(
+  content: AppleDocContentItem[] | undefined,
+  references: Record<string, AppleDocReference> | undefined
+): string {
+  if (!content?.length) return "";
+  const blocks: string[] = [];
+  renderContentBlocks(content, references, blocks);
+  // Every block already ends in a newline, so joining with nothing puts each
+  // on its own line without the blank line the page body uses between blocks.
+  return blocks.join("").trim();
+}
+
 export function extractParameters(
   sections: AppleDocPage["primaryContentSections"],
   references?: Record<string, AppleDocReference>
@@ -311,11 +327,7 @@ export function extractParameters(
   const params = paramSection.parameters
     .map((p: AppleDocParameter) => ({
       name: p.name,
-      description: (p.content ?? [])
-        .filter((item) => item.type === "paragraph" && item.inlineContent)
-        .map((item) => extractText(item.inlineContent, references))
-        .filter(Boolean)
-        .join(" "),
+      description: renderParameterDescription(p.content, references),
     }))
     .filter((p) => p.name);
 

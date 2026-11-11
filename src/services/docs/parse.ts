@@ -153,6 +153,26 @@ export function extractDeprecationInfo(metadata: AppleDocPage["metadata"]): {
 // Parsers for specific response shapes
 // ---------------------------------------------------------------------------
 
+// Sample-code archives are published under this base; a page refers to its
+// archive by a path relative to it.
+const SAMPLE_CODE_DOWNLOAD_BASE = "https://docs-assets.developer.apple.com/published/";
+
+/** The https URL of a sample-code page's downloadable project, if it has one. */
+function extractSampleCodeDownloadUrl(page: AppleDocPage): string | undefined {
+  const identifier = page.sampleCodeDownload?.action?.identifier;
+  if (!identifier || !page.references || !Object.prototype.hasOwnProperty.call(page.references, identifier)) {
+    return undefined;
+  }
+  const location = page.references[identifier].url;
+  if (!location) return undefined;
+  try {
+    const url = new URL(location, SAMPLE_CODE_DOWNLOAD_BASE);
+    return url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
   const meta = page.metadata ?? {};
   const title = meta.title || page.identifier?.url || path;
@@ -197,6 +217,7 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
   }));
 
   const webUrl = buildWebUrl(canonicalPath);
+  const sampleCodeDownloadUrl = extractSampleCodeDownloadUrl(page);
 
   const moduleName = meta.modules?.[0]?.name;
 
@@ -223,6 +244,7 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
     seeAlsoSections,
     overview,
     ...extractRestSections(page),
+    ...(sampleCodeDownloadUrl ? { sampleCodeDownloadUrl } : {}),
   };
 }
 

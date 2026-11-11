@@ -8,12 +8,14 @@
  * in the caller's allowlist. That keeps a user-supplied path/slug from being
  * coerced into an arbitrary host. Redirects are never followed automatically:
  * they are either returned to the caller or followed hop by hop with the
- * allowlist re-checked each time.
+ * allowlist re-checked each time. Requests that fail for a transient reason
+ * (server error, short rate limit, dropped connection, timeout) are retried.
  */
 
-import axios from "axios";
+import axios, { AxiosError } from "axios";
 import { REQUEST_TIMEOUT_MS } from "../constants.js";
 import { VERSION } from "../version.js";
+import { withRetry } from "./retry.js";
 
 // Help-center articles are the largest of these pages (~370KB); WWDC pages
 // ~150KB. 8MB leaves generous headroom without inviting a decompression bomb.
@@ -100,8 +102,21 @@ const MAX_JSON_REDIRECTS = 3;
  * (not-found / challenge gate) rather than an error.
  */
 export async function fetchHtml(url: string, allowedHosts: readonly string[]): Promise<HtmlResponse> {
-  assertAllowedUrl(url, allowedHosts);
-  const response = await htmlClient.get<string>(url);
+  const { hostname } = assertAllowedUrl(url, allowedHosts);
+  const response = await withRetry(async () => {
+    const attempt = await htmlClient.get<string>(url);
+    // htmlClient resolves on every 4xx so callers can read redirects and
+    // not-found pages; a rate limit is the one that should be retried instead.
+    if (attempt.status === 429) {
+      throw new AxiosError("Rate limited", AxiosError.ERR_BAD_RESPONSE, attempt.config, attempt.request, attempt);
+    }
+    return attempt;
+  }).catch((error: unknown) => {
+    if (error instanceof AxiosError && error.response?.status === 429) {
+      throw new Error(`${hostname} is rate limiting requests. Wait a moment and try again.`);
+    }
+    throw error;
+  });
   const location = response.headers?.location;
   return {
     status: response.status,
@@ -154,11 +169,14 @@ export async function fetchJson<T>(
     // Re-validate scheme + host on EVERY hop, including redirect targets — a 3xx
     // Location must not be able to smuggle the fetch to a non-allowlisted host.
     assertAllowedUrl(current, allowedHosts);
-    const response = await jsonClient.get<T>(current, {
-      maxContentLength: maxBytes,
-      maxBodyLength: maxBytes,
-      ...(options.userAgent ? { headers: { "User-Agent": options.userAgent } } : {}),
-    });
+    const hopUrl = current;
+    const response = await withRetry(() =>
+      jsonClient.get<T>(hopUrl, {
+        maxContentLength: maxBytes,
+        maxBodyLength: maxBytes,
+        ...(options.userAgent ? { headers: { "User-Agent": options.userAgent } } : {}),
+      })
+    );
 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers?.location;
@@ -200,19 +218,22 @@ export async function postJsonForText(
   options: PostOptions
 ): Promise<string> {
   assertAllowedUrl(url, allowedHosts);
-  const response = await axios.post<string>(url, body, {
-    timeout: options.timeoutMs ?? REQUEST_TIMEOUT_MS,
-    maxContentLength: JSON_MAX_BYTES,
-    maxBodyLength: JSON_MAX_BYTES,
-    maxRedirects: 0,
-    responseType: "text",
-    headers: {
-      Accept: options.accept,
-      "Content-Type": "application/json",
-      "User-Agent": options.userAgent ?? BROWSER_UA,
-      "Accept-Encoding": "gzip, deflate, br",
-    },
-    validateStatus: (status) => status >= 200 && status < 300,
-  });
+  // Every POST made through here is a read-only query, so repeating it is safe.
+  const response = await withRetry(() =>
+    axios.post<string>(url, body, {
+      timeout: options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+      maxContentLength: JSON_MAX_BYTES,
+      maxBodyLength: JSON_MAX_BYTES,
+      maxRedirects: 0,
+      responseType: "text",
+      headers: {
+        Accept: options.accept,
+        "Content-Type": "application/json",
+        "User-Agent": options.userAgent ?? BROWSER_UA,
+        "Accept-Encoding": "gzip, deflate, br",
+      },
+      validateStatus: (status) => status >= 200 && status < 300,
+    })
+  );
   return typeof response.data === "string" ? response.data : String(response.data ?? "");
 }

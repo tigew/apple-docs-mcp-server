@@ -108,3 +108,11 @@ test("the server reports the version from package.json", async () => {
 
   assert.equal(initialized.serverInfo.version, packageJson.version);
 });
+
+test("the package's bin command points at the built, executable entry script", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+
+  assert.deepEqual(Object.keys(packageJson.bin ?? {}), ["apple-docs-mcp-server"]);
+  const script = readFileSync(new URL(`../${packageJson.bin["apple-docs-mcp-server"]}`, import.meta.url), "utf8");
+  assert.match(script, /^#!\/usr\/bin\/env node\n/);
+});

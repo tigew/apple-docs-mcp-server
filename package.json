@@ -2,12 +2,20 @@
   "name": "apple-docs-mcp-server",
   "version": "1.0.0",
   "description": "MCP server for accessing Apple Developer Documentation",
+  "private": true,
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "apple-docs-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "prepare": "npm run build",
     "clean": "rm -rf dist",
     "test": "npm run build && node --test test/**/*.test.js"
   },

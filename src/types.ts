@@ -47,6 +47,8 @@ export interface AppleDocContentItem {
   style?: string;
   content?: AppleDocContentItem[];
   items?: unknown[];
+  // tabNavigator
+  tabs?: Array<{ title?: string; content?: AppleDocContentItem[] }>;
   // Table fields (avoids unsafe `as unknown as` casts)
   header?: string;
   rows?: AppleDocTableRow[];
@@ -70,11 +72,46 @@ export interface AppleDocParameter {
   content?: AppleDocContentItem[];
 }
 
+/**
+ * A named, typed entry in a web-service reference section: a REST parameter,
+ * an object property, a response code, or an enumeration value.
+ */
+export interface AppleDocRestField extends AppleDocParameter {
+  type?: AppleDocFragment[];
+  required?: boolean;
+  deprecated?: boolean;
+  /** Constraints such as `{ kind: "allowedValues", values: [...] }` or `{ kind: "maximum", value: "200" }`. */
+  attributes?: Array<{ kind: string; value?: unknown; values?: unknown[] }>;
+  // Response-code entries only
+  status?: number;
+  reason?: string;
+  mimeType?: string;
+}
+
 export interface AppleDocPrimaryContentSection {
   kind: string;
+  title?: string;
   content?: AppleDocContentItem[];
   declarations?: AppleDocDeclaration[];
   parameters?: AppleDocParameter[];
+  // kind "restEndpoint": method, base URL, path, and path-parameter tokens
+  tokens?: AppleDocFragment[];
+  // kinds "restParameters" (with `source`: query | path | header), "restResponses", "properties"
+  items?: AppleDocRestField[];
+  source?: string;
+  // kind "restBody"
+  bodyContentType?: AppleDocFragment[];
+  mimeType?: string;
+  // kind "possibleValues"
+  values?: AppleDocRestField[];
+  // kind "details" (property-list keys and entitlements)
+  details?: {
+    name?: string;
+    ideTitle?: string;
+    value?: Array<{ baseType?: string; arrayMode?: boolean }>;
+  };
+  // kind "mentions": identifiers of the pages that mention this one
+  mentions?: string[];
 }
 
 export interface AppleDocDeclaration {
@@ -181,7 +218,49 @@ export interface AppleDocPage {
   schemaVersion?: { major: number; minor: number; patch: number };
 }
 
-export interface ParsedSymbol {
+/** A parameter, property, or enumeration value on a web-service reference page. */
+export interface ParsedField {
+  name: string;
+  type?: string;
+  /** Documentation path of `type`, when it is a documented type. Usable with apple_docs_get_page. */
+  typePath?: string;
+  required?: boolean;
+  description: string;
+  allowedValues?: string[];
+  /** Other constraints, e.g. "Maximum: 200". */
+  constraints?: string[];
+  deprecated?: boolean;
+}
+
+/** Reference sections found on web-service and configuration pages; each is set only when present. */
+export interface ParsedRestSections {
+  restEndpoints?: Array<{ title: string; method: string; url: string }>;
+  /** One group per parameter source (path, query, header). */
+  restParameters?: Array<{ title: string; source: string; items: ParsedField[] }>;
+  restBody?: {
+    title: string;
+    mimeType?: string;
+    type?: string;
+    typePath?: string;
+    description: string;
+    parameters?: ParsedField[];
+  };
+  restResponses?: Array<{
+    status: number;
+    reason?: string;
+    mimeType?: string;
+    type?: string;
+    typePath?: string;
+    description: string;
+  }>;
+  properties?: { title: string; items: ParsedField[] };
+  possibleValues?: { title: string; items: ParsedField[] };
+  /** Property-list key or entitlement details. */
+  details?: { name: string; ideTitle?: string; valueTypes: string[] };
+  mentionedIn?: Array<{ title: string; path: string }>;
+}
+
+export interface ParsedSymbol extends ParsedRestSections {
   title: string;
   kind: string;
   role: string;

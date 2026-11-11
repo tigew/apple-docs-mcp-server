@@ -246,6 +246,12 @@ export function renderContentBlocks(
           }
         }
       }
+    } else if (item.type === "tabNavigator" && Array.isArray(item.tabs)) {
+      // Each tab is a titled group of blocks (e.g. "Request" / "Response").
+      for (const tab of item.tabs) {
+        if (tab?.title) targetLines.push(`**${tab.title}**\n`);
+        if (tab?.content) renderContentBlocks(tab.content, references, targetLines, depth + 1);
+      }
     } else if (item.type === "row" || item.type === "tabNavigator") {
       // Layout containers: recurse into any nested content
       if (item.content) {

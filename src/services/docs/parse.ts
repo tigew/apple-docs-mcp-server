@@ -4,6 +4,7 @@
 
 import { AppleDocGroup, AppleDocPage, AppleDocReference, AppleDocSection, AppleDocTechnologyEntry, ParsedSymbol, ParsedTechnologies } from "../../types.js";
 import { extractText, extractDeclaration, extractOverview, extractParameters } from "./content.js";
+import { extractRestSections } from "./rest.js";
 import { buildWebUrl, normalizeDocUrl, normalizePath, pathFromDocUrl } from "./paths.js";
 
 export function resolveReferenceItems(
@@ -214,6 +215,7 @@ export function parseDocPage(page: AppleDocPage, path: string): ParsedSymbol {
     relationships,
     seeAlsoSections,
     overview,
+    ...extractRestSections(page),
   };
 }
 

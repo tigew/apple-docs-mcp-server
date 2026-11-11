@@ -54,51 +54,57 @@ An MCP (Model Context Protocol) server that gives Claude and other LLMs direct a
 ### Prerequisites
 
 - **Node.js 18+** — [nodejs.org](https://nodejs.org)
+- **git** — `npx` fetches this repository with it
 
 ---
 
 ### Claude Code (easiest)
 
 ```bash
-git clone https://github.com/tigew/apple-docs-mcp-server.git ~/apple-docs-mcp-server
-cd ~/apple-docs-mcp-server && npm install && npm run build
-claude mcp add --scope user apple-docs -- node ~/apple-docs-mcp-server/dist/index.js
+claude mcp add --scope user apple-docs -- npx -y github:tigew/apple-docs-mcp-server
 ```
 
-Done. The `--scope user` flag makes it available in every project, not just this folder.
+Done. `npx` downloads this repository from GitHub, builds it, and runs it. The `--scope user` flag makes it available in every project, not just this folder.
+
+> **Use the `github:` form exactly as written.** This project is not published to npm, and the bare name `apple-docs-mcp-server` on the npm registry is an unrelated package by another author — `npx apple-docs-mcp-server` would run that one, not this server.
 
 ---
 
 ### Claude Desktop
 
-**Step 1** — Clone and build:
-
-```bash
-git clone https://github.com/tigew/apple-docs-mcp-server.git
-cd apple-docs-mcp-server
-npm install && npm run build
-pwd  # copy this path — you'll need it in the next step
-```
-
-**Step 2** — Open your Claude Desktop config:
+**Step 1** — Open your Claude Desktop config:
 
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-**Step 3** — Add the server:
+**Step 2** — Add the server:
 
 ```json
 {
   "mcpServers": {
     "apple-docs": {
-      "command": "node",
-      "args": ["/paste/your/path/here/apple-docs-mcp-server/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "github:tigew/apple-docs-mcp-server"]
     }
   }
 }
 ```
 
-**Step 4** — Restart Claude Desktop.
+**Step 3** — Restart Claude Desktop.
+
+---
+
+### From a local clone
+
+Use this instead if you want to change the code or stay on a specific commit:
+
+```bash
+git clone https://github.com/tigew/apple-docs-mcp-server.git ~/apple-docs-mcp-server
+cd ~/apple-docs-mcp-server && npm install   # also builds
+claude mcp add --scope user apple-docs -- node ~/apple-docs-mcp-server/dist/index.js
+```
+
+For Claude Desktop, use `"command": "node"` with `"args": ["/full/path/to/apple-docs-mcp-server/dist/index.js"]`. After pulling new commits, run `npm run build` and restart the client.
 
 ---
 

@@ -1,0 +1,100 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+// End-to-end checks of the built server over stdio. Everything here is answered
+// without a network request, so the suite stays offline.
+
+const SERVER = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+
+// Start the server, hand `use` a JSON-RPC request function, and stop the server.
+async function withServer(use) {
+  const child = spawn(process.execPath, [SERVER], { stdio: ["pipe", "pipe", "ignore"] });
+  const pending = new Map();
+  let buffer = "";
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    let newline;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (!line.trim()) continue;
+      const message = JSON.parse(line);
+      pending.get(message.id)?.(message);
+      pending.delete(message.id);
+    }
+  });
+
+  let nextId = 1;
+  const rpc = (method, params) =>
+    new Promise((resolve, reject) => {
+      const id = nextId++;
+      const timer = setTimeout(() => reject(new Error(`no reply to ${method}`)), 10000);
+      pending.set(id, (message) => {
+        clearTimeout(timer);
+        if (message.error) reject(new Error(JSON.stringify(message.error)));
+        else resolve(message.result);
+      });
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    });
+
+  try {
+    await rpc("initialize", {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "server-test", version: "0" },
+    });
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    return await use(rpc);
+  } finally {
+    child.kill();
+  }
+}
+
+test("the server lists every tool, in registration order", async () => {
+  const { tools } = await withServer((rpc) => rpc("tools/list", {}));
+
+  assert.deepEqual(
+    tools.map((tool) => tool.name),
+    [
+      "apple_docs_list_technologies",
+      "apple_docs_get_page",
+      "apple_docs_search",
+      "apple_docs_find_symbol",
+      "apple_docs_get_symbol_raw",
+      "apple_swift_book_get_page",
+      "apple_swift_get_release_notes",
+      "apple_wwdc_get_session",
+      "apple_app_store_review_guidelines",
+      "apple_app_store_connect_help",
+      "apple_forums_list_threads",
+      "apple_support_article",
+      "apple_ml_research",
+      "apple_developer_news",
+      "apple_technical_qa",
+    ]
+  );
+});
+
+test("every tool is advertised as a read-only lookup", async () => {
+  const { tools } = await withServer((rpc) => rpc("tools/list", {}));
+
+  for (const tool of tools) {
+    assert.deepEqual(
+      tool.annotations,
+      { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      tool.name
+    );
+  }
+});
+
+test("a tool reports a rejected input as an error result, not a failed request", async () => {
+  // Path validation rejects this before any network request is made.
+  const result = await withServer((rpc) =>
+    rpc("tools/call", { name: "apple_docs_get_page", arguments: { path: "../etc/passwd" } })
+  );
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /^Error: Invalid path .*path traversal/);
+});

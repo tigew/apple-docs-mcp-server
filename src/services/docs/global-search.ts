@@ -91,7 +91,14 @@ export async function searchGlobalSymbols(query: string, limit: number): Promise
     // answer ("ask"), neither of which this tool uses.
     { text: query, targetResultLocale: "en", includedResponses: ["search"] },
     [APPLE_GLOBAL_SEARCH_HOST],
-    { accept: "application/jsonl", timeoutMs: GLOBAL_SEARCH_TIMEOUT_MS, userAgent: SERVER_USER_AGENT }
+    {
+      accept: "application/jsonl",
+      timeoutMs: GLOBAL_SEARCH_TIMEOUT_MS,
+      userAgent: SERVER_USER_AGENT,
+      // The backend takes 4-8s and its results vary run to run, so repeat
+      // questions are answered from memory for a few minutes.
+      cacheTtlMs: 5 * 60 * 1000,
+    }
   );
   return parseGlobalSearchResponse(assembleSearchStream(stream), limit);
 }

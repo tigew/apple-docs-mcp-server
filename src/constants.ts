@@ -25,6 +25,9 @@ export const APPLE_DEV_HOST = "developer.apple.com";
 export const APPLE_GLOBAL_SEARCH_HOST = "devintserv.msc.sbz.apple.com";
 export const CHARACTER_LIMIT = 25000;
 export const REQUEST_TIMEOUT_MS = 15000;
+// Listings of new content (forum threads, news, release feeds) are reused from
+// memory for a shorter time than reference pages, which keep 30 minutes.
+export const LISTING_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Additional Apple-authored surfaces (each a distinct origin from the docs API)

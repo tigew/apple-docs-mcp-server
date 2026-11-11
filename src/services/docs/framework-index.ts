@@ -5,15 +5,16 @@
 import { APPLE_DOCS_BASE_URL, MAX_RECURSION_DEPTH } from "../../constants.js";
 import { AppleDocIndexNode, AppleDocIndexResponse } from "../../types.js";
 import { AxiosError } from "axios";
-import { createTtlCache } from "./cache.js";
+import { createCache, getOrLoad } from "../cache.js";
 import { fetchDocsJson, FRAMEWORK_INDEX_MAX_BYTES } from "./http.js";
 import { pathFromDocUrl } from "./paths.js";
 
-// Framework navigator-index payloads are much larger (up to several MB) than
-// a single doc page, hence the longer TTL (they change less often) and much
-// smaller capacity. The flattened symbol list is what gets cached, so the tree
-// is walked once per fetch rather than once per search.
-const symbolCache = createTtlCache<FlattenedIndexSymbol[]>(15 * 60 * 1000, 15);
+// A framework's index is a multi-megabyte download (Foundation's is ~6.8MB)
+// that changes rarely, so its symbols are kept for an hour. The flattened list
+// is what gets cached, so the tree is walked once per download rather than
+// once per search. The budget is in characters of symbol JSON.
+const SYMBOLS_TTL_MS = 60 * 60 * 1000;
+const symbolCache = createCache<FlattenedIndexSymbol[]>({ maxEntries: 20, maxSize: 24 * 1024 * 1024 });
 
 // ---------------------------------------------------------------------------
 // Framework navigator index — the full recursive symbol tree that powers the
@@ -29,17 +30,19 @@ const symbolCache = createTtlCache<FlattenedIndexSymbol[]>(15 * 60 * 1000, 15);
  * callers should treat this as a best-effort search tier and fall back
  * gracefully.
  */
-export async function fetchFrameworkSymbols(topLevelFramework: string): Promise<FlattenedIndexSymbol[]> {
-  const cached = symbolCache.get(topLevelFramework);
-  if (cached) return cached;
-
-  const trees = await loadFrameworkIndexNodes(topLevelFramework, (url) =>
-    fetchDocsJson<unknown>(url, FRAMEWORK_INDEX_MAX_BYTES)
+export function fetchFrameworkSymbols(topLevelFramework: string): Promise<FlattenedIndexSymbol[]> {
+  // getOrLoad also makes simultaneous searches of one framework share a
+  // single download instead of each starting their own.
+  return getOrLoad(
+    symbolCache,
+    topLevelFramework,
+    SYMBOLS_TTL_MS,
+    async () =>
+      mergeFrameworkIndexSymbols(
+        await loadFrameworkIndexNodes(topLevelFramework, (url) => fetchDocsJson<unknown>(url, FRAMEWORK_INDEX_MAX_BYTES))
+      ),
+    { sizeOf: (symbols) => JSON.stringify(symbols).length }
   );
-  const symbols = mergeFrameworkIndexSymbols(trees);
-
-  symbolCache.set(topLevelFramework, symbols);
-  return symbols;
 }
 
 /** A framework's navigator index: one symbol tree per language. */

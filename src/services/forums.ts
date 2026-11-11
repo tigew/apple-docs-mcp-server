@@ -19,6 +19,7 @@ import {
   APPLE_FORUMS_HOST,
   APPLE_FORUMS_TAGS_BASE,
   APPLE_FORUMS_THREAD_BASE,
+  LISTING_CACHE_TTL_MS,
 } from "../constants.js";
 import { fetchHtml } from "./safe-fetch.js";
 
@@ -79,7 +80,7 @@ export async function fetchForumThreads(tagInput?: string): Promise<{ tag?: stri
   const tag = tagInput ? validateForumTag(tagInput) : undefined;
   const url = tag ? `${APPLE_FORUMS_TAGS_BASE}/${tag}` : APPLE_FORUMS_HOME_URL;
 
-  const { status, html } = await fetchHtml(url, [APPLE_FORUMS_HOST]);
+  const { status, html } = await fetchHtml(url, [APPLE_FORUMS_HOST], { cacheTtlMs: LISTING_CACHE_TTL_MS });
   if (status >= 300 && status < 400) {
     throw new Error(
       `The Apple Developer Forums listing at ${url} redirected to a bot-verification page and could not be read ` +

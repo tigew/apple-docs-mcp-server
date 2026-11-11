@@ -4,6 +4,7 @@
  */
 
 import { AppleDocPage, PathResolution, PathSuggestion } from "../../types.js";
+import { AxiosError } from "axios";
 import { FlattenedIndexSymbol, fetchFrameworkSymbols } from "./framework-index.js";
 import { searchGlobalSymbols } from "./global-search.js";
 import { rawFetchDocPage } from "./http.js";
@@ -231,14 +232,19 @@ export function resolveFromIndexSymbols(
  */
 export async function resolvePathSuggestions(normalizedPath: string): Promise<PathResolution> {
   const topLevelFramework = normalizedPath.split("/")[0];
+  // Set when a lookup fails for a reason other than "no such framework", so
+  // the caller knows not to treat an empty answer as final.
+  let incomplete = false;
 
   try {
     const resolution = resolveFromIndexSymbols(normalizedPath, await fetchFrameworkSymbols(topLevelFramework));
     if (resolution.autoResolvePath || resolution.suggestions.length > 0) {
       return resolution;
     }
-  } catch {
-    // Unknown framework or index fetch failure — fall through to global search
+  } catch (error) {
+    // An unknown framework has no index (a 404) — fall through to global
+    // search either way, but only a 404 is a definite answer.
+    if (!(error instanceof AxiosError) || error.response?.status !== 404) incomplete = true;
   }
 
   // Nothing in this framework — the symbol may live elsewhere (e.g.
@@ -246,7 +252,7 @@ export async function resolvePathSuggestions(normalizedPath: string): Promise<Pa
   try {
     const leaf = normalizedPath.split("/").pop() ?? normalizedPath;
     const queryName = baseSymbolName(leaf);
-    if (queryName.length < 3) return { suggestions: [], crossFramework: false };
+    if (queryName.length < 3) return { suggestions: [], crossFramework: false, ...(incomplete ? { incomplete } : {}) };
 
     const hits = await searchGlobalSymbols(queryName, MAX_SUGGESTIONS);
     const targetAlnum = alnumKey(stripLeafDisambiguation(leaf));
@@ -261,9 +267,10 @@ export async function resolvePathSuggestions(normalizedPath: string): Promise<Pa
         framework: hit.framework,
       })),
       crossFramework: true,
+      ...(incomplete ? { incomplete } : {}),
     };
   } catch {
-    return { suggestions: [], crossFramework: false };
+    return { suggestions: [], crossFramework: false, incomplete: true };
   }
 }
 

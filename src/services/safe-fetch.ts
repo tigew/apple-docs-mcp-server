@@ -9,12 +9,14 @@
  * coerced into an arbitrary host. Redirects are never followed automatically:
  * they are either returned to the caller or followed hop by hop with the
  * allowlist re-checked each time. Requests that fail for a transient reason
- * (server error, short rate limit, dropped connection, timeout) are retried.
+ * (server error, short rate limit, dropped connection, timeout) are retried,
+ * and successful responses are reused from memory for a while.
  */
 
 import axios, { AxiosError } from "axios";
 import { REQUEST_TIMEOUT_MS } from "../constants.js";
 import { VERSION } from "../version.js";
+import { createCache, getOrLoad } from "./cache.js";
 import { withRetry } from "./retry.js";
 
 // Help-center articles are the largest of these pages (~370KB); WWDC pages
@@ -29,6 +31,20 @@ export const SERVER_USER_AGENT = `apple-docs-mcp-server/${VERSION}`;
 // Safari UA so we get the same server-rendered HTML a browser would.
 const BROWSER_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+
+// Successful responses are kept in memory and reused: these pages change
+// rarely, several tools read different parts of one large page (every App
+// Store Review Guideline lives on a single page), and a model often asks for
+// several at once. The budget is in characters of response text.
+const responseCache = createCache<unknown>({ maxEntries: 200, maxSize: 24 * 1024 * 1024 });
+
+/** How long a response is reused unless the caller says otherwise. */
+export const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000;
+
+export interface CacheOptions {
+  /** How long a successful response may be reused. 0 always refetches. Default: 30 minutes. */
+  cacheTtlMs?: number;
+}
 
 export interface HtmlResponse {
   status: number;
@@ -101,7 +117,23 @@ const MAX_JSON_REDIRECTS = 3;
  * body without following redirects, so callers can treat a 3xx as a signal
  * (not-found / challenge gate) rather than an error.
  */
-export async function fetchHtml(url: string, allowedHosts: readonly string[]): Promise<HtmlResponse> {
+export function fetchHtml(
+  url: string,
+  allowedHosts: readonly string[],
+  options: CacheOptions = {}
+): Promise<HtmlResponse> {
+  assertAllowedUrl(url, allowedHosts);
+  return getOrLoad(
+    responseCache as ReturnType<typeof createCache<HtmlResponse>>,
+    `html:${url}`,
+    options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS,
+    () => requestHtml(url, allowedHosts),
+    // Only a real page is kept: a redirect or an error page may be temporary.
+    { sizeOf: (response) => response.html.length, keep: (response) => response.status === 200 }
+  );
+}
+
+async function requestHtml(url: string, allowedHosts: readonly string[]): Promise<HtmlResponse> {
   const { hostname } = assertAllowedUrl(url, allowedHosts);
   const response = await withRetry(async () => {
     const attempt = await htmlClient.get<string>(url);
@@ -131,10 +163,14 @@ export async function fetchHtml(url: string, allowedHosts: readonly string[]): P
  * legitimately redirect within their own host (e.g. support.apple.com adds a
  * locale segment and maps legacy HT-numbers to numeric ids).
  */
-export async function fetchHtmlFollow(url: string, allowedHosts: readonly string[]): Promise<HtmlResponse> {
+export async function fetchHtmlFollow(
+  url: string,
+  allowedHosts: readonly string[],
+  options: CacheOptions = {}
+): Promise<HtmlResponse> {
   let current = url;
   for (let hop = 0; hop <= 5; hop++) {
-    const response = await fetchHtml(current, allowedHosts);
+    const response = await fetchHtml(current, allowedHosts, options);
     if (response.status >= 300 && response.status < 400) {
       if (!response.location) throw new Error(`Redirect without a Location header from ${current}.`);
       current = new URL(response.location, current).toString();
@@ -145,7 +181,7 @@ export async function fetchHtmlFollow(url: string, allowedHosts: readonly string
   throw new Error(`Too many redirects fetching ${url}.`);
 }
 
-export interface JsonFetchOptions {
+export interface JsonFetchOptions extends CacheOptions {
   /** Response size cap in bytes (default 8MB). */
   maxBytes?: number;
   /** User-Agent header (default: a browser UA). */
@@ -158,11 +194,22 @@ export interface JsonFetchOptions {
  * status, and guards against non-object payloads (e.g. an HTML error page
  * served with a 200).
  */
-export async function fetchJson<T>(
+export function fetchJson<T>(
   url: string,
   allowedHosts: readonly string[],
   options: JsonFetchOptions = {}
 ): Promise<T> {
+  assertAllowedUrl(url, allowedHosts);
+  return getOrLoad(
+    responseCache as ReturnType<typeof createCache<T>>,
+    `json:${url}`,
+    options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS,
+    () => requestJson<T>(url, allowedHosts, options),
+    { sizeOf: (data) => JSON.stringify(data).length }
+  );
+}
+
+async function requestJson<T>(url: string, allowedHosts: readonly string[], options: JsonFetchOptions): Promise<T> {
   const maxBytes = options.maxBytes ?? JSON_MAX_BYTES;
   let current = url;
   for (let hop = 0; hop <= MAX_JSON_REDIRECTS; hop++) {
@@ -196,7 +243,7 @@ export async function fetchJson<T>(
   throw new Error(`Too many redirects fetching ${url}.`);
 }
 
-export interface PostOptions {
+export interface PostOptions extends CacheOptions {
   /** Accept header describing the expected response body. */
   accept: string;
   /** Request timeout in milliseconds (default REQUEST_TIMEOUT_MS). */
@@ -211,13 +258,23 @@ export interface PostOptions {
  * is never followed, since re-sending a POST body to another URL is not
  * something any of these APIs should ask for.
  */
-export async function postJsonForText(
+export function postJsonForText(
   url: string,
   body: unknown,
   allowedHosts: readonly string[],
   options: PostOptions
 ): Promise<string> {
   assertAllowedUrl(url, allowedHosts);
+  return getOrLoad(
+    responseCache as ReturnType<typeof createCache<string>>,
+    `post:${url}:${JSON.stringify(body)}`,
+    options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS,
+    () => requestPostForText(url, body, options),
+    { sizeOf: (text) => text.length }
+  );
+}
+
+async function requestPostForText(url: string, body: unknown, options: PostOptions): Promise<string> {
   // Every POST made through here is a read-only query, so repeating it is safe.
   const response = await withRetry(() =>
     axios.post<string>(url, body, {

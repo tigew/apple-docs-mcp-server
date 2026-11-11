@@ -229,7 +229,8 @@ npm run clean && npm run build
 
 ## Notes
 
-- **Rate limiting**: Apple's CDN is generally permissive for documentation fetches, but avoid hammering it in tight loops.
+- **Caching**: Responses are kept in memory and reused — reference pages for 30 minutes, a framework's symbol index for an hour, listings of new content (forums, news, release feeds) for 5 minutes. A path found not to exist is remembered for 10 minutes. Nothing is written to disk, so each new server process starts empty.
+- **Retries and rate limiting**: A request that fails with a server error, a brief rate limit, or a dropped connection is retried up to twice with growing waits. Apple's CDN is generally permissive for documentation fetches, but avoid hammering it in tight loops.
 - **Unofficial API**: This uses Apple's undocumented JSON API. It has been stable for years but could theoretically change. Global search (`apple_docs_find_symbol` and cross-framework 404 recovery) additionally uses the API behind the developer.apple.com search page; if that endpoint changes, those features degrade gracefully to plain 404s while everything else keeps working.
 - **HTML-scraped surfaces are more fragile**: WWDC, App Store Review Guidelines, App Store Connect Help, and Forums listings are parsed from server-rendered HTML (no JSON API exists for them). If Apple restyles those pages, extraction for that surface may need updating, while the JSON-backed docs, HIG, and Swift-book tools keep working.
 - **No auth needed**: All content is publicly accessible without a developer account.

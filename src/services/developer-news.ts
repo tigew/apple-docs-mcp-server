@@ -14,6 +14,7 @@ import {
   DEV_NEWS_HOST,
   DEV_NEWS_INDEX_URL,
   DEV_NEWS_POST_BASE,
+  LISTING_CACHE_TTL_MS,
 } from "../constants.js";
 import { fetchHtml } from "./safe-fetch.js";
 import { normalizeInline, renderBlockText } from "./html-render.js";
@@ -112,7 +113,7 @@ export function parseNewsPost(html: string, id: string): NewsItem | null {
 }
 
 export async function fetchNewsList(limit: number): Promise<NewsItem[]> {
-  const { html } = await fetchHtml(DEV_NEWS_INDEX_URL, [DEV_NEWS_HOST]);
+  const { html } = await fetchHtml(DEV_NEWS_INDEX_URL, [DEV_NEWS_HOST], { cacheTtlMs: LISTING_CACHE_TTL_MS });
   return parseNewsIndex(html, limit);
 }
 

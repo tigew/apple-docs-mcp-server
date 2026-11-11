@@ -378,6 +378,11 @@ export interface PathResolution {
   crossFramework: boolean;
   /** Matches beyond the suggestion cap that were not included. */
   omittedCount?: number;
+  /**
+   * True when a lookup failed for a reason other than "no such thing" (a
+   * timeout, a server error), so the answer may be missing matches.
+   */
+  incomplete?: boolean;
 }
 
 /**

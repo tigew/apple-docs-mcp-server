@@ -20,7 +20,9 @@ export const FRAMEWORK_INDEX_MAX_BYTES = 20 * 1024 * 1024;
  * AxiosError on a 4xx/5xx status, so callers can branch on a 404.
  */
 export function fetchDocsJson<T>(url: string, maxBytes: number = DOC_PAGE_MAX_BYTES): Promise<T> {
-  return fetchJson<T>(url, [APPLE_DEV_HOST], { maxBytes, userAgent: SERVER_USER_AGENT });
+  // No response cache here: pages and indexes are cached by their own modules
+  // (page.ts, framework-index.ts), which would otherwise hold them twice.
+  return fetchJson<T>(url, [APPLE_DEV_HOST], { maxBytes, userAgent: SERVER_USER_AGENT, cacheTtlMs: 0 });
 }
 
 // In-flight request deduplication: avoid fetching the same URL concurrently
@@ -46,17 +48,20 @@ export function rawFetchDocPage(normalizedPath: string): Promise<AppleDocPage> {
   return promise;
 }
 
+/** The error for a path with no page and nothing to suggest in its place. */
+export function pageNotFoundError(path: string): Error {
+  return new Error(
+    `Documentation page not found for path "${path}". ` +
+      `Check the path matches a valid Apple documentation URL (e.g. "swiftui/view", "swift/array", "foundation"). ` +
+      `You can use apple_docs_list_technologies to discover framework names, or ` +
+      `apple_docs_find_symbol to locate a symbol across all frameworks.`
+  );
+}
+
 export function wrapFetchError(error: unknown, path: string): Error {
   if (error instanceof AxiosError) {
     const status = error.response?.status;
-    if (status === 404) {
-      return new Error(
-        `Documentation page not found for path "${path}". ` +
-          `Check the path matches a valid Apple documentation URL (e.g. "swiftui/view", "swift/array", "foundation"). ` +
-          `You can use apple_docs_list_technologies to discover framework names, or ` +
-          `apple_docs_find_symbol to locate a symbol across all frameworks.`
-      );
-    }
+    if (status === 404) return pageNotFoundError(path);
     if (status === 400) {
       return new Error(
         `Invalid documentation path "${path}". The path may contain unsupported characters. ` +

@@ -22,6 +22,7 @@ import {
   SWIFT_ORG_HOST,
   SWIFT_RELEASES_ATOM_URL,
   SWIFT_RELEASES_HOST,
+  LISTING_CACHE_TTL_MS,
 } from "../constants.js";
 import { AppleDocPage, ParsedSymbol } from "../types.js";
 import { fetchHtml, fetchJson } from "./safe-fetch.js";
@@ -144,7 +145,7 @@ export async function fetchSwiftReleaseNotes(limit: number): Promise<SwiftReleas
   const perFeed = Math.max(1, Math.ceil(limit / feeds.length) + 2);
   const settled = await Promise.allSettled(
     feeds.map(async (feed) => {
-      const { html } = await fetchHtml(feed.url, [feed.host]);
+      const { html } = await fetchHtml(feed.url, [feed.host], { cacheTtlMs: LISTING_CACHE_TTL_MS });
       return parseAtomFeed(html, feed.source, perFeed);
     })
   );

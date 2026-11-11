@@ -10,7 +10,7 @@ import {
   formatGuidelineSectionMarkdown,
   formatGuidelinesIndexMarkdown,
 } from "../services/appstore-guidelines.js";
-import { registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
 
 export function registerAppStoreGuidelinesTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -41,17 +41,19 @@ Examples:
           .optional()
           .describe('Guideline number like "2.3.1". Omit to list all sections.'),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ section, response_format }) => {
+    async ({ section, response_format, offset }) => {
       if (section && section.trim()) {
-        return render(response_format, await fetchGuidelineSection(section.trim()), formatGuidelineSectionMarkdown);
+        return render(response_format, await fetchGuidelineSection(section.trim()), formatGuidelineSectionMarkdown, offset);
       }
       const index = await fetchGuidelinesIndex();
       return renderList(
         response_format,
         { base: { count: index.length }, key: "sections", items: index },
-        formatGuidelinesIndexMarkdown
+        formatGuidelinesIndexMarkdown,
+        offset
       );
     }
   );

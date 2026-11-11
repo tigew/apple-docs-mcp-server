@@ -39,6 +39,15 @@ function formatField(field: ParsedField): string {
 export function formatDocPageMarkdown(parsed: ParsedSymbol): string {
   const lines: string[] = [];
 
+  // Say so first when this is not the page that was asked for, so a wrong
+  // guess at a path is never mistaken for documentation of that path.
+  if (parsed.redirectedFrom) {
+    lines.push(
+      `> **Note:** No page exists at \`${parsed.redirectedFrom}\`. Showing the closest match instead: \`${parsed.path}\`.`
+    );
+    lines.push("");
+  }
+
   // Deprecation banner at top
   if (parsed.deprecated) {
     let banner = `> **DEPRECATED**${parsed.deprecatedAt ? ` (${parsed.deprecatedAt})` : ""}`;

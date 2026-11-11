@@ -261,6 +261,11 @@ export interface ParsedRestSections {
 }
 
 export interface ParsedSymbol extends ParsedRestSections {
+  /**
+   * Set when the requested path does not exist and this page was returned in
+   * its place (see fetchDocPageResolved): the path that was asked for.
+   */
+  redirectedFrom?: string;
   title: string;
   kind: string;
   role: string;

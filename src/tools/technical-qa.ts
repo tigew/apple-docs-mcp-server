@@ -5,7 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchTechnicalQa, formatTechnicalQaMarkdown } from "../services/technical-qa.js";
-import { registerReadTool, render, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, responseFormatParam } from "./shared.js";
 
 export function registerTechnicalQaTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -27,9 +27,10 @@ Args:
       inputSchema: {
         id: z.string().min(1).max(20).describe('Technical Q&A id like "qa1361"'),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ id, response_format }) =>
-      render(response_format, await fetchTechnicalQa(id), formatTechnicalQaMarkdown)
+    async ({ id, response_format, offset }) =>
+      render(response_format, await fetchTechnicalQa(id), formatTechnicalQaMarkdown, offset)
   );
 }

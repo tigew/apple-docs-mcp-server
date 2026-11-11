@@ -116,3 +116,22 @@ test("the package's bin command points at the built, executable entry script", (
   const script = readFileSync(new URL(`../${packageJson.bin["apple-docs-mcp-server"]}`, import.meta.url), "utf8");
   assert.match(script, /^#!\/usr\/bin\/env node\n/);
 });
+
+test("every tool that can return a long document accepts an offset to continue it", async () => {
+  const { tools } = await withServer((rpc) => rpc("tools/list", {}));
+
+  const paged = tools.filter((tool) => "offset" in tool.inputSchema.properties).map((tool) => tool.name);
+  assert.deepEqual(paged, [
+    "apple_docs_get_page",
+    "apple_swift_book_get_page",
+    "apple_swift_get_release_notes",
+    "apple_wwdc_get_session",
+    "apple_app_store_review_guidelines",
+    "apple_app_store_connect_help",
+    "apple_forums_list_threads",
+    "apple_support_article",
+    "apple_ml_research",
+    "apple_developer_news",
+    "apple_technical_qa",
+  ]);
+});

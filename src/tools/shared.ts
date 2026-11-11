@@ -6,7 +6,7 @@
 import type { McpServer, ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { clampJsonList, clampJsonResponse, clampTextResponse } from "./truncation.js";
+import { paginateJson, paginateJsonList, paginateText } from "./truncation.js";
 
 export enum ResponseFormat {
   MARKDOWN = "markdown",
@@ -62,38 +62,40 @@ export function registerReadTool<Shape extends z.ZodRawShape>(
   );
 }
 
-/** Notes appended (markdown) or embedded (JSON) when a response is cut to fit. */
-interface TruncationNotes {
-  json?: string;
-  markdown?: string;
-}
+/**
+ * The `offset` input of every tool that can return more than fits in one
+ * response. Its unit depends on the response (characters, or list items for a
+ * JSON list), so callers treat it as opaque and pass back what they were given.
+ */
+export const offsetParam = z
+  .number()
+  .int()
+  .min(0)
+  .default(0)
+  .describe(
+    "Where to continue a truncated response from: pass the offset that response told you to use. Omit to start at the beginning."
+  );
 
-const DEFAULT_JSON_NOTE = "Response truncated.";
-const DEFAULT_MARKDOWN_NOTE = "\n\n*(Response truncated.)*";
-
-/** Render one value as JSON or markdown, kept within the response size limit. */
-export function render<T>(
-  format: ResponseFormat,
-  value: T,
-  toMarkdown: (value: T) => string,
-  notes: TruncationNotes = {}
-): string {
-  return format === ResponseFormat.JSON
-    ? clampJsonResponse(value, notes.json ?? DEFAULT_JSON_NOTE)
-    : clampTextResponse(toMarkdown(value), notes.markdown ?? DEFAULT_MARKDOWN_NOTE);
+/**
+ * Render one value as JSON or markdown. A response too large to return at
+ * once is returned a page at a time, starting from `offset`.
+ */
+export function render<T>(format: ResponseFormat, value: T, toMarkdown: (value: T) => string, offset = 0): string {
+  return format === ResponseFormat.JSON ? paginateJson(value, offset) : paginateText(toMarkdown(value), offset);
 }
 
 /**
- * Render a list as JSON or markdown. JSON is `{ ...base, [key]: items }` and,
- * when too large, keeps as many whole items as fit instead of summarizing.
+ * Render a list as JSON or markdown, a page at a time from `offset` when it
+ * is too large to return at once. JSON is `{ ...base, [key]: items }`, paged
+ * by whole items so every page is valid JSON.
  */
 export function renderList<T>(
   format: ResponseFormat,
   list: { base: Record<string, unknown>; key: string; items: T[] },
   toMarkdown: (items: T[]) => string,
-  notes: TruncationNotes = {}
+  offset = 0
 ): string {
   return format === ResponseFormat.JSON
-    ? clampJsonList(list.base, list.key, list.items, notes.json ?? DEFAULT_JSON_NOTE)
-    : clampTextResponse(toMarkdown(list.items), notes.markdown ?? DEFAULT_MARKDOWN_NOTE);
+    ? paginateJsonList(list.base, list.key, list.items, offset)
+    : paginateText(toMarkdown(list.items), offset);
 }

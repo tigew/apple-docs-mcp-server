@@ -7,6 +7,7 @@ import { z } from "zod";
 import { CHARACTER_LIMIT } from "../constants.js";
 import {
   fetchDocPage,
+  fetchDocPageResolved,
   formatDocPageMarkdown,
   formatGlobalSearchResultsMarkdown,
   formatSearchResultsMarkdown,
@@ -17,7 +18,7 @@ import {
   searchFramework,
   searchGlobalSymbols,
 } from "../services/apple-docs.js";
-import { registerReadTool, render, ResponseFormat, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, ResponseFormat, responseFormatParam } from "./shared.js";
 import { clampJsonResponse, clampTextResponse } from "./truncation.js";
 
 export function registerAppleDocsTools(server: McpServer): void {
@@ -168,13 +169,19 @@ Error Handling:
             "The documentation path (everything after /documentation/ in the Apple docs URL). E.g.: 'swiftui', 'swiftui/view', 'swift/array', 'foundation/urlsession'"
           ),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ path, response_format }) =>
-      render(response_format, parseDocPage(await fetchDocPage(path), path), formatDocPageMarkdown, {
-        json: "Response truncated. Use a more specific path to get details on a particular symbol.",
-        markdown: "\n\n*(Response truncated. Use a more specific path to get details on a particular symbol.)*",
-      })
+    async ({ path, response_format, offset }) => {
+      const { page, redirectedFrom } = await fetchDocPageResolved(path);
+      const parsed = parseDocPage(page, path);
+      return render(
+        response_format,
+        redirectedFrom ? { redirectedFrom, ...parsed } : parsed,
+        formatDocPageMarkdown,
+        offset
+      );
+    }
   );
 
   // ---------------------------------------------------------------------------
@@ -339,8 +346,14 @@ Note: To browse or exhaustively search one framework's complete symbol tree, use
     },
     async ({ query, limit, response_format }) => {
       const results = await searchGlobalSymbols(query, limit);
-      return render(
-        response_format,
+
+      if (response_format !== ResponseFormat.JSON) {
+        return clampTextResponse(
+          formatGlobalSearchResultsMarkdown(results, query),
+          "\n\n*(Response truncated — reduce limit or refine your query.)*"
+        );
+      }
+      return clampJsonResponse(
         {
           query,
           count: results.length,
@@ -349,11 +362,7 @@ Note: To browse or exhaustively search one framework's complete symbol tree, use
             : {}),
           results,
         },
-        () => formatGlobalSearchResultsMarkdown(results, query),
-        {
-          json: "Response truncated. Reduce limit or refine your query.",
-          markdown: "\n\n*(Response truncated — reduce limit or refine your query.)*",
-        }
+        "Response truncated. Reduce limit or refine your query."
       );
     }
   );

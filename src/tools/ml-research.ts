@@ -10,7 +10,7 @@ import {
   formatMlResearchListMarkdown,
   formatMlResearchPostMarkdown,
 } from "../services/ml-research.js";
-import { registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
 
 export function registerMlResearchTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -34,17 +34,19 @@ Args:
         slug: z.string().max(200).optional().describe('Post slug like "environment-free". Omit to list recent posts.'),
         limit: z.number().int().min(1).max(50).default(15).describe("Max posts when listing (default: 15)"),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ slug, limit, response_format }) => {
+    async ({ slug, limit, response_format, offset }) => {
       if (slug && slug.trim()) {
-        return render(response_format, await fetchMlResearchPost(slug.trim()), formatMlResearchPostMarkdown);
+        return render(response_format, await fetchMlResearchPost(slug.trim()), formatMlResearchPostMarkdown, offset);
       }
       const list = await fetchMlResearchList(limit);
       return renderList(
         response_format,
         { base: { count: list.length }, key: "posts", items: list },
-        formatMlResearchListMarkdown
+        formatMlResearchListMarkdown,
+        offset
       );
     }
   );

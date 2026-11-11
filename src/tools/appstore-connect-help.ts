@@ -10,7 +10,7 @@ import {
   formatHelpArticleMarkdown,
   formatHelpIndexMarkdown,
 } from "../services/appstore-connect-help.js";
-import { registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
 
 export function registerAppStoreConnectHelpTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -36,19 +36,19 @@ Args:
           .optional()
           .describe('Help article path or "testflight". Omit to list available articles.'),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ path, response_format }) => {
+    async ({ path, response_format, offset }) => {
       if (path && path.trim()) {
-        return render(response_format, await fetchHelpArticle(path.trim()), formatHelpArticleMarkdown, {
-          json: "Response truncated. The article may be long.",
-        });
+        return render(response_format, await fetchHelpArticle(path.trim()), formatHelpArticleMarkdown, offset);
       }
       const index = await fetchHelpIndex();
       return renderList(
         response_format,
         { base: { count: index.length }, key: "articles", items: index },
-        formatHelpIndexMarkdown
+        formatHelpIndexMarkdown,
+        offset
       );
     }
   );

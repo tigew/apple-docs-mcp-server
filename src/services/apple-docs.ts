@@ -13,7 +13,7 @@ export { formatDocPageMarkdown, formatGlobalSearchResultsMarkdown, formatSearchR
 export { flattenFrameworkIndexNodes, loadFrameworkIndexNodes } from "./docs/framework-index.js";
 export type { FlattenedIndexSymbol } from "./docs/framework-index.js";
 export { assembleSearchStream, parseGlobalSearchResponse, searchGlobalSymbols } from "./docs/global-search.js";
-export { fetchDocPage } from "./docs/page.js";
+export { fetchDocPage, fetchDocPageResolved } from "./docs/page.js";
 export { parseDocPage, parseTechnologies } from "./docs/parse.js";
 export { normalizePath } from "./docs/paths.js";
 export { boundedEditDistance, resolveChildPathFromParentPage, resolveFromIndexSymbols } from "./docs/resolve.js";

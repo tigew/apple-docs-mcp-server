@@ -1652,3 +1652,33 @@ test("loadFrameworkIndexNodes rejects when neither URL exists, so a missing inde
   );
   assert.deepEqual(transport.requested, [`${INDEX_BASE}/notaframework`, `${INDEX_BASE}/notaframework.json`]);
 });
+
+// =========================================================================
+// Redirect notice: a page returned in place of a path that does not exist
+// =========================================================================
+
+test("formatDocPageMarkdown opens with a notice when the page is not the one requested", () => {
+  const symbol = {
+    title: "RelevantContext",
+    kind: "symbol",
+    role: "symbol",
+    abstract: "Contextual clues.",
+    platforms: [],
+    path: "relevancekit/relevantcontext",
+    webUrl: "https://developer.apple.com/documentation/relevancekit/relevantcontext",
+    topicSections: [],
+    relationships: [],
+    seeAlsoSections: [],
+    overview: "",
+  };
+
+  const redirected = formatDocPageMarkdown({ ...symbol, redirectedFrom: "widgetkit/relevantcontext" });
+  assert.ok(
+    redirected.startsWith(
+      "> **Note:** No page exists at `widgetkit/relevantcontext`. Showing the closest match instead: `relevancekit/relevantcontext`.\n\n# RelevantContext"
+    ),
+    redirected.slice(0, 200)
+  );
+
+  assert.ok(formatDocPageMarkdown(symbol).startsWith("# RelevantContext"));
+});

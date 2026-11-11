@@ -5,7 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchSupportArticle, formatSupportArticleMarkdown } from "../services/support-kb.js";
-import { registerReadTool, render, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, responseFormatParam } from "./shared.js";
 
 export function registerSupportKbTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -29,11 +29,10 @@ Returns the article title, summary, and body (including eligibility lists/tables
         id: z.string().min(1).max(20).describe('Article id, e.g. "108351" or "HT201260"'),
         locale: z.string().max(10).optional().describe('Locale like "en-us" (default) or "de-de"'),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ id, locale, response_format }) =>
-      render(response_format, await fetchSupportArticle(id, locale), formatSupportArticleMarkdown, {
-        json: "Response truncated. The article may be long.",
-      })
+    async ({ id, locale, response_format, offset }) =>
+      render(response_format, await fetchSupportArticle(id, locale), formatSupportArticleMarkdown, offset)
   );
 }

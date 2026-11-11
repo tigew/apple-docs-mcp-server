@@ -10,7 +10,7 @@ import {
   fetchSwiftReleaseNotes,
   formatSwiftReleaseNotesMarkdown,
 } from "../services/swift-docs.js";
-import { registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
 
 export function registerSwiftDocsTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -38,13 +38,11 @@ Returns the chapter's prose, code listings, and links to sub-topics (paths usabl
           .max(300, "Path is too long")
           .describe("Book path or chapter slug, e.g. 'the-swift-programming-language', 'thebasics', 'concurrency'"),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ path, response_format }) =>
-      render(response_format, await fetchSwiftBookPage(path), formatDocPageMarkdown, {
-        json: "Response truncated. Use a more specific chapter path.",
-        markdown: "\n\n*(Response truncated. Use a more specific chapter path.)*",
-      })
+    async ({ path, response_format, offset }) =>
+      render(response_format, await fetchSwiftBookPage(path), formatDocPageMarkdown, offset)
   );
 
   // ---------------------------------------------------------------------------
@@ -68,15 +66,16 @@ Returns entries with title, date, source, link, and a short summary, newest firs
       inputSchema: {
         limit: z.number().int().min(1).max(25).default(10).describe("Maximum number of entries (default: 10)"),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ limit, response_format }) => {
+    async ({ limit, response_format, offset }) => {
       const entries = await fetchSwiftReleaseNotes(limit);
       return renderList(
         response_format,
         { base: { count: entries.length }, key: "entries", items: entries },
         formatSwiftReleaseNotesMarkdown,
-        { markdown: "\n\n*(Response truncated — reduce limit.)*" }
+        offset
       );
     }
   );

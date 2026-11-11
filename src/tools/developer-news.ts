@@ -12,7 +12,7 @@ import {
   formatNewsListMarkdown,
   formatNewsPostMarkdown,
 } from "../services/developer-news.js";
-import { registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, renderList, responseFormatParam } from "./shared.js";
 
 export function registerDeveloperNewsTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -41,20 +41,22 @@ Args:
         page: z.string().max(120).optional().describe('Marketing microsite slug like "apple-intelligence"'),
         limit: z.number().int().min(1).max(50).default(15).describe("Max posts when listing (default: 15)"),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ id, page, limit, response_format }) => {
+    async ({ id, page, limit, response_format, offset }) => {
       if (page && page.trim()) {
-        return render(response_format, await fetchMarketingPage(page.trim()), formatMarketingPageMarkdown);
+        return render(response_format, await fetchMarketingPage(page.trim()), formatMarketingPageMarkdown, offset);
       }
       if (id && id.trim()) {
-        return render(response_format, await fetchNewsPost(id.trim()), formatNewsPostMarkdown);
+        return render(response_format, await fetchNewsPost(id.trim()), formatNewsPostMarkdown, offset);
       }
       const list = await fetchNewsList(limit);
       return renderList(
         response_format,
         { base: { count: list.length }, key: "posts", items: list },
-        formatNewsListMarkdown
+        formatNewsListMarkdown,
+        offset
       );
     }
   );

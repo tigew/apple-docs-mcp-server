@@ -5,7 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchWwdcSession, formatWwdcSessionMarkdown } from "../services/wwdc.js";
-import { registerReadTool, render, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, render, responseFormatParam } from "./shared.js";
 
 export function registerWwdcTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -31,12 +31,10 @@ Find session ids by browsing developer.apple.com/videos/play/wwdc{year}/. A non-
         year: z.string().min(4).max(4).describe("4-digit conference year, e.g. '2024'"),
         session: z.string().min(1).max(10).describe("Session id, e.g. '10176'"),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ year, session, response_format }) =>
-      render(response_format, await fetchWwdcSession(year, session), formatWwdcSessionMarkdown, {
-        json: "Response truncated. The transcript may be long.",
-        markdown: "\n\n*(Response truncated — the transcript is long; fetch JSON for structured access.)*",
-      })
+    async ({ year, session, response_format, offset }) =>
+      render(response_format, await fetchWwdcSession(year, session), formatWwdcSessionMarkdown, offset)
   );
 }

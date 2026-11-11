@@ -5,7 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchForumThreads, formatForumThreadsMarkdown } from "../services/forums.js";
-import { registerReadTool, renderList, responseFormatParam } from "./shared.js";
+import { offsetParam, registerReadTool, renderList, responseFormatParam } from "./shared.js";
 
 export function registerForumsTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
@@ -31,9 +31,10 @@ Args:
           .optional()
           .describe('Forum tag slug like "swiftui". Omit for recent threads across all tags.'),
         response_format: responseFormatParam,
+        offset: offsetParam,
       },
     },
-    async ({ tag, response_format }) => {
+    async ({ tag, response_format, offset }) => {
       const { tag: resolvedTag, threads } = await fetchForumThreads(tag?.trim() || undefined);
       return renderList(
         response_format,
@@ -46,7 +47,8 @@ Args:
           key: "threads",
           items: threads,
         },
-        (items) => formatForumThreadsMarkdown(resolvedTag, items)
+        (items) => formatForumThreadsMarkdown(resolvedTag, items),
+        offset
       );
     }
   );

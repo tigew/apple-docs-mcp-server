@@ -135,3 +135,11 @@ test("every tool that can return a long document accepts an offset to continue i
     "apple_technical_qa",
   ]);
 });
+
+test("apple_wwdc_get_session needs only a year, so it can list and search sessions", async () => {
+  const { tools } = await withServer((rpc) => rpc("tools/list", {}));
+  const wwdc = tools.find((tool) => tool.name === "apple_wwdc_get_session");
+
+  assert.deepEqual(wwdc.inputSchema.required, ["year"]);
+  assert.ok("query" in wwdc.inputSchema.properties);
+});

@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 
 import { assertAllowedUrl } from "../dist/services/safe-fetch.js";
 import { normalizeSwiftBookPath, parseAtomFeed } from "../dist/services/swift-docs.js";
-import { validateWwdcRef, parseWwdcSessionHtml } from "../dist/services/wwdc.js";
+import {
+  formatWwdcSessionListMarkdown,
+  parseWwdcSessionHtml,
+  parseWwdcYearListing,
+  searchWwdcSessions,
+  validateWwdcRef,
+} from "../dist/services/wwdc.js";
 import {
   validateGuidelineNumber,
   parseGuidelinesIndex,
@@ -370,4 +376,126 @@ test("parseTechnicalQa extracts question/code and rejects a page with no doc num
   assert.ok(!qa.blocks.some((b) => /^A:\s*How do I detect/i.test(b.text)));
 
   assert.equal(parseTechnicalQa("<html><body>404</body></html>", "qa9999", "u"), null);
+});
+
+// ---------------------------------------------------------------------------
+// WWDC session lookup: the per-year listing page
+// ---------------------------------------------------------------------------
+
+// Mirrors the cards on developer.apple.com/videos/wwdc2024/. Apple lowercases
+// the description in the card's filter attributes.
+function wwdcCard({ href, category, title, duration, description, keywords = "", platform, topics }) {
+  return `
+    <a href="${href}" class="vc-card tile tile-rounded grid-item" data-released="true" data-category="${category}">
+      <div class="vc-card__media"><div class="vc-card__image-container">
+        <img class="vc-card__image" width="250" src="https://devimages-cdn.apple.com/x.jpg" alt="${title}" loading="lazy">
+        <span class="vc-card__duration">${duration}</span>
+      </div></div>
+      <div class="vc-card__content"><div class="tile-content">
+        <h5 class="vc-card__title">${title}</h5>
+        <span class="vc-card__keywords hidden" data-filter-title="${title.toLowerCase()}" data-filter-description="${description}"
+          data-filter-title-en="${title.toLowerCase()}" data-filter-description-en="${description}" data-filter-keywords="${keywords}"
+          data-filter-collectionid="wwdc24" data-filter-subtitle="english|japanese" data-filter-platform="${platform}" data-filter-topics="${topics}"></span>
+      </div></div>
+    </a>`;
+}
+
+const WWDC_LISTING_HTML = `<html><body><section class="grid">
+  ${wwdcCard({ href: "/videos/play/wwdc2024/10136/", category: "swift", title: "What’s new in Swift", duration: "30:24", description: "join us for an update on swift. we'll explore noncopyable types and typed throws.", platform: "ios|macos", topics: "Swift" })}
+  ${wwdcCard({ href: "/videos/play/wwdc2024/10179/", category: "developer-tools", title: "Meet Swift Testing", duration: "23:19", description: "introducing swift testing, a new package for testing your code using swift.", keywords: "xctest,unit tests", platform: "ios|ipados|macos", topics: "Developer Tools|Swift" })}
+  ${wwdcCard({ href: "/videos/play/wwdc2024/10144/", category: "swiftui-&-ui-frameworks", title: "What’s new in SwiftUI", duration: "25:10", description: "learn how you can use swiftui to build great apps for any apple platform.", platform: "ios|visionos", topics: "SwiftUI & UI Frameworks" })}
+  <a href="/videos/play/tech-talks/111386/" class="vc-card tile"><h5 class="vc-card__title">A tech talk, not a WWDC session</h5></a>
+  <a href="/videos/play/wwdc2024/10136/" class="other-link">duplicate link that is not a card</a>
+</section></body></html>`;
+
+test("parseWwdcYearListing reads each session card and ignores other videos", () => {
+  const sessions = parseWwdcYearListing(WWDC_LISTING_HTML, "2024");
+
+  assert.deepEqual(sessions, [
+    {
+      id: "10136",
+      title: "What’s new in Swift",
+      path: "wwdc2024/10136",
+      url: "https://developer.apple.com/videos/play/wwdc2024/10136/",
+      duration: "30:24",
+      topics: ["Swift"],
+      platforms: ["ios", "macos"],
+      keywords: [],
+      description: "join us for an update on swift. we'll explore noncopyable types and typed throws.",
+    },
+    {
+      id: "10179",
+      title: "Meet Swift Testing",
+      path: "wwdc2024/10179",
+      url: "https://developer.apple.com/videos/play/wwdc2024/10179/",
+      duration: "23:19",
+      topics: ["Developer Tools", "Swift"],
+      platforms: ["ios", "ipados", "macos"],
+      keywords: ["xctest", "unit tests"],
+      description: "introducing swift testing, a new package for testing your code using swift.",
+    },
+    {
+      id: "10144",
+      title: "What’s new in SwiftUI",
+      path: "wwdc2024/10144",
+      url: "https://developer.apple.com/videos/play/wwdc2024/10144/",
+      duration: "25:10",
+      topics: ["SwiftUI & UI Frameworks"],
+      platforms: ["ios", "visionos"],
+      keywords: [],
+      description: "learn how you can use swiftui to build great apps for any apple platform.",
+    },
+  ]);
+});
+
+test("searchWwdcSessions keeps only sessions matching every word when any do", () => {
+  const sessions = parseWwdcYearListing(WWDC_LISTING_HTML, "2024");
+
+  // "testing" appears only in one session; "swift" alone would match all three.
+  assert.deepEqual(searchWwdcSessions(sessions, "swift testing").map((s) => s.id), ["10179"]);
+  // Matches a keyword, not the title or description.
+  assert.deepEqual(searchWwdcSessions(sessions, "xctest").map((s) => s.id), ["10179"]);
+  // Matches a topic.
+  assert.deepEqual(searchWwdcSessions(sessions, "ui frameworks").map((s) => s.id), ["10144"]);
+});
+
+test("searchWwdcSessions falls back to partial matches, best first, when no session has every word", () => {
+  const sessions = parseWwdcYearListing(WWDC_LISTING_HTML, "2024");
+
+  // No session mentions "kotlin". "noncopyable" and "throws" are both in 10136; "testing" only in 10179.
+  assert.deepEqual(searchWwdcSessions(sessions, "noncopyable throws testing kotlin").map((s) => s.id), ["10136", "10179"]);
+  assert.deepEqual(searchWwdcSessions(sessions, "kotlin"), []);
+});
+
+test("searchWwdcSessions treats straight and typographic apostrophes as the same", () => {
+  const sessions = parseWwdcYearListing(WWDC_LISTING_HTML, "2024");
+
+  // Titles use ’; people type '. Title matches rank ahead of description-only matches.
+  assert.deepEqual(searchWwdcSessions(sessions, "what's new").map((s) => s.id), ["10136", "10144"]);
+});
+
+test("formatWwdcSessionListMarkdown lists ids, and adds descriptions only to search results", () => {
+  const sessions = parseWwdcYearListing(WWDC_LISTING_HTML, "2024");
+
+  const all = formatWwdcSessionListMarkdown({ year: "2024", total: 3, sessions });
+  assert.match(all, /^# WWDC 2024 Sessions\n3 sessions\./);
+  assert.match(all, /- \*\*What’s new in Swift\*\* — session `10136` · 30:24 · Swift\n/);
+  assert.match(all, /- \*\*Meet Swift Testing\*\* — session `10179` · 23:19 · Developer Tools, Swift\n/);
+  assert.doesNotMatch(all, /join us for an update/);
+
+  const found = formatWwdcSessionListMarkdown({ year: "2024", query: "testing", total: 3, sessions: [sessions[1]] });
+  assert.match(found, /^# WWDC 2024 Sessions\n1 of 3 sessions match "testing"\./);
+  assert.match(found, /- \*\*Meet Swift Testing\*\* — session `10179` · 23:19 · Developer Tools, Swift\n  introducing swift testing, a new package for testing your code using swift\.\n/);
+
+  const none = formatWwdcSessionListMarkdown({ year: "2024", query: "kotlin", total: 3, sessions: [] });
+  assert.match(none, /No WWDC 2024 sessions match "kotlin"/);
+});
+
+test("searchWwdcSessions ranks by the distinctive word when a query has no complete match", () => {
+  const sessions = parseWwdcYearListing(WWDC_LISTING_HTML, "2024");
+
+  // No session has all three words. "what's" and "new" are common here (two
+  // and three of the three sessions); "testing" is in just one — so that one
+  // is the answer, not the two "What's new in ..." titles.
+  assert.deepEqual(searchWwdcSessions(sessions, "what's new testing").map((s) => s.id), ["10179"]);
 });

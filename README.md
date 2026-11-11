@@ -24,7 +24,7 @@ An MCP (Model Context Protocol) server that gives Claude and other LLMs direct a
 |------|-------------|
 | `apple_swift_book_get_page` | Read *The Swift Programming Language* (TSPL) chapters from swift.org — the language reference the framework docs defer to |
 | `apple_swift_get_release_notes` | Recent Swift release notes / "What's new in Swift" from swift.org |
-| `apple_wwdc_get_session` | Fetch a WWDC session **transcript**, chapters, and code samples by year + session id |
+| `apple_wwdc_get_session` | Read a WWDC session **transcript**, chapters, and code samples — or list and search a year's sessions to find the session id |
 | `apple_app_store_review_guidelines` | Browse or read a numbered App Store Review Guideline (e.g. `2.3.1`) |
 | `apple_app_store_connect_help` | Read App Store Connect Help articles and the TestFlight page |
 | `apple_forums_list_threads` | List recent Developer Forums thread titles/links (optionally by tag) — see note below |
@@ -44,6 +44,7 @@ An MCP (Model Context Protocol) server that gives Claude and other LLMs direct a
 - *"What does the Human Interface Guidelines say about buttons?"*
 - *"How does Swift handle actors and concurrency?"* (reads TSPL)
 - *"Get the transcript for WWDC 2024 session 10176"*
+- *"Which WWDC 2024 sessions cover Swift Testing?"* (searches the year's sessions)
 - *"What are the App Store rules on accurate metadata?"* (guideline 2.3)
 - *"List all Apple frameworks"*
 

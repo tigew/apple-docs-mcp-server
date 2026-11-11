@@ -48,6 +48,8 @@ export const SWIFT_RELEASES_ATOM_URL = "https://github.com/swiftlang/swift/relea
 // WWDC session video + transcript pages — legacy server-rendered HTML, no JSON.
 export const WWDC_HOST = "developer.apple.com";
 export const WWDC_SESSION_BASE = "https://developer.apple.com/videos/play";
+// Per-year session listing: developer.apple.com/videos/wwdc{YYYY}/ (server-rendered cards).
+export const WWDC_VIDEOS_BASE = "https://developer.apple.com/videos";
 
 // App Store Review Guidelines — a single server-rendered HTML page with stable
 // numeric anchors on every guideline (1, 2.3, 2.3.1, ...).

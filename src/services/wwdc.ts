@@ -1,6 +1,7 @@
 /**
  * WWDC session scraper — transcript + metadata for
- * developer.apple.com/videos/play/wwdc{YYYY}/{NNN}/.
+ * developer.apple.com/videos/play/wwdc{YYYY}/{NNN}/, and the per-year session
+ * listing at developer.apple.com/videos/wwdc{YYYY}/ used to find session ids.
  *
  * These are legacy server-rendered HTML pages (no JSON API), so we fetch the
  * HTML over plain HTTPS and parse it with cheerio. A non-existent session
@@ -9,7 +10,7 @@
  */
 
 import { load, type CheerioAPI } from "cheerio";
-import { WWDC_HOST, WWDC_SESSION_BASE } from "../constants.js";
+import { WWDC_HOST, WWDC_SESSION_BASE, WWDC_VIDEOS_BASE } from "../constants.js";
 import { fetchHtml } from "./safe-fetch.js";
 
 export interface WwdcChapter {
@@ -243,4 +244,179 @@ export function formatWwdcSessionMarkdown(session: WwdcSession): string {
   }
 
   return lines.join("\n").trim();
+}
+
+// ---------------------------------------------------------------------------
+// Session lookup: the per-year listing
+// ---------------------------------------------------------------------------
+
+export interface WwdcSessionSummary {
+  id: string;
+  title: string;
+  /** "wwdc2024/10136" — the form used for related sessions. */
+  path: string;
+  url: string;
+  duration: string;
+  topics: string[];
+  platforms: string[];
+  keywords: string[];
+  /** As published in the listing, where Apple lowercases it. */
+  description: string;
+}
+
+export interface WwdcSessionListing {
+  year: string;
+  query?: string;
+  /** Sessions in the year, before any query was applied. */
+  total: number;
+  sessions: WwdcSessionSummary[];
+}
+
+function splitList(value: string | undefined, separator: string): string[] {
+  return (value ?? "")
+    .split(separator)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Parse a year's listing page into its sessions. Each session is a card
+ * linking to /videos/play/wwdc{year}/{id}/; other cards (tech talks, other
+ * years) and non-card links to the same sessions are ignored.
+ */
+export function parseWwdcYearListing(html: string, year: string): WwdcSessionSummary[] {
+  const $: CheerioAPI = load(html);
+  const sessions: WwdcSessionSummary[] = [];
+  const seen = new Set<string>();
+
+  $("a.vc-card").each((_, el) => {
+    const card = $(el);
+    const match = (card.attr("href") ?? "").match(/^\/videos\/play\/wwdc(\d{4})\/(\d+)\/?$/);
+    if (!match || match[1] !== year || seen.has(match[2])) return;
+    const id = match[2];
+    seen.add(id);
+
+    const filters = card.find(".vc-card__keywords").first();
+    sessions.push({
+      id,
+      title: collapse(card.find(".vc-card__title").first().text()),
+      path: `wwdc${year}/${id}`,
+      url: `${WWDC_SESSION_BASE}/wwdc${year}/${id}/`,
+      duration: collapse(card.find(".vc-card__duration").first().text()),
+      topics: splitList(filters.attr("data-filter-topics"), "|"),
+      platforms: splitList(filters.attr("data-filter-platform"), "|"),
+      keywords: splitList(filters.attr("data-filter-keywords"), ","),
+      description: collapse(filters.attr("data-filter-description") ?? ""),
+    });
+  });
+
+  return sessions;
+}
+
+/** Lowercase, and fold typographic apostrophes so "what's" matches "What’s". */
+function searchable(text: string): string {
+  return text.toLowerCase().replace(/[\u2018\u2019]/g, "'");
+}
+
+// With no complete match, a session is kept if it scores at least this share
+// of the best partial match's score.
+const PARTIAL_MATCH_SHARE = 0.5;
+
+/**
+ * Find sessions matching a free-text query against title, topics, keywords,
+ * and description.
+ *
+ * If any session contains every query word, only those are returned, title
+ * matches first. Otherwise words are weighted by how rare they are across the
+ * year's sessions — so in "what's new in swiftdata" it is "swiftdata" that
+ * counts, not the words nearly every session has — and the sessions scoring
+ * within reach of the best one are returned, best first.
+ */
+export function searchWwdcSessions(sessions: WwdcSessionSummary[], query: string): WwdcSessionSummary[] {
+  const words = [...new Set(searchable(query).split(/\s+/).filter(Boolean))];
+  if (words.length === 0) return sessions;
+
+  const indexed = sessions.map((session, order) => {
+    const title = searchable(session.title);
+    const everything = searchable(
+      [session.title, session.topics.join(" "), session.keywords.join(" "), session.description].join(" ")
+    );
+    return {
+      session,
+      order,
+      matched: words.filter((word) => everything.includes(word)),
+      inTitle: words.filter((word) => title.includes(word)).length,
+    };
+  });
+
+  const complete = indexed.filter((entry) => entry.matched.length === words.length);
+  if (complete.length > 0) {
+    return complete.sort((a, b) => b.inTitle - a.inTitle || a.order - b.order).map((entry) => entry.session);
+  }
+
+  // Inverse document frequency: a word found in every session weighs nothing.
+  const weight = new Map(
+    words.map((word) => {
+      const containing = indexed.filter((entry) => entry.matched.includes(word)).length;
+      return [word, containing > 0 ? Math.log(sessions.length / containing) : 0] as const;
+    })
+  );
+  const scored = indexed
+    .map((entry) => ({ ...entry, score: entry.matched.reduce((sum, word) => sum + (weight.get(word) ?? 0), 0) }))
+    .filter((entry) => entry.score > 0);
+  const best = Math.max(0, ...scored.map((entry) => entry.score));
+
+  return scored
+    .filter((entry) => entry.score >= best * PARTIAL_MATCH_SHARE)
+    .sort((a, b) => b.score - a.score || b.inTitle - a.inTitle || a.order - b.order)
+    .map((entry) => entry.session);
+}
+
+/**
+ * List a year's sessions, optionally narrowed by a query. Throws a helpful
+ * error for a year Apple has no listing for (it redirects to the videos home).
+ */
+export async function fetchWwdcSessions(yearInput: string, query?: string): Promise<WwdcSessionListing> {
+  const { year } = validateWwdcRef(yearInput, "0");
+  const url = `${WWDC_VIDEOS_BASE}/wwdc${year}/`;
+
+  const { status, html } = await fetchHtml(url, [WWDC_HOST]);
+  const all = status >= 200 && status < 300 ? parseWwdcYearListing(html, year) : [];
+  if (all.length === 0) {
+    throw new Error(
+      `No WWDC session listing was found for ${year}. Apple publishes session videos from 2014 onward; ` +
+        `check the year at ${WWDC_VIDEOS_BASE}/.`
+    );
+  }
+
+  const trimmed = query?.trim();
+  return {
+    year,
+    ...(trimmed ? { query: trimmed } : {}),
+    total: all.length,
+    sessions: trimmed ? searchWwdcSessions(all, trimmed) : all,
+  };
+}
+
+export function formatWwdcSessionListMarkdown(listing: WwdcSessionListing): string {
+  const { year, query, total, sessions } = listing;
+  if (query && sessions.length === 0) {
+    return (
+      `No WWDC ${year} sessions match "${query}" (${total} sessions searched by title, topic, keyword, and description). ` +
+      `Try fewer or different words, or omit query to list every session.`
+    );
+  }
+
+  const lines = [`# WWDC ${year} Sessions`];
+  lines.push(query ? `${sessions.length} of ${total} sessions match "${query}".` : `${total} sessions.`);
+  lines.push("Pass a session id as `session` to read its transcript.", "");
+
+  for (const session of sessions) {
+    const facts = [`session \`${session.id}\``, session.duration, session.topics.join(", ")].filter(Boolean);
+    lines.push(`- **${session.title}** — ${facts.join(" · ")}`);
+    // Descriptions help choose between search hits, but would triple the size of a full listing.
+    if (query && session.description) lines.push(`  ${session.description}`);
+  }
+
+  return lines.join("\n") + "\n";
 }

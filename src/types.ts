@@ -284,7 +284,8 @@ export interface PathResolution {
 /**
  * A node in Apple's per-framework navigator index (the full symbol tree that
  * powers the docs-site sidebar), fetched from
- *   https://developer.apple.com/tutorials/data/index/{framework}.json
+ *   https://developer.apple.com/tutorials/data/index/{framework}
+ * (formerly served with a `.json` suffix, which is kept as a fallback).
  */
 export interface AppleDocIndexNode {
   title?: string;

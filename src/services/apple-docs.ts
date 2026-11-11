@@ -258,9 +258,37 @@ async function fetchFrameworkIndex(topLevelFramework: string): Promise<AppleDocI
   const cached = getCachedIndex(topLevelFramework);
   if (cached) return cached;
 
-  const url = `${APPLE_DOCS_BASE_URL}/index/${topLevelFramework}.json`;
-  const response = await indexHttpClient.get<AppleDocIndexResponse>(url);
-  const data = response.data;
+  const nodes = await loadFrameworkIndexNodes(topLevelFramework, async (url) => {
+    const response = await indexHttpClient.get<unknown>(url);
+    return response.data;
+  });
+
+  setCachedIndex(topLevelFramework, nodes);
+  return nodes;
+}
+
+/**
+ * Load a framework's navigator-index nodes through `get`, an HTTP GET that
+ * resolves to the parsed response body and rejects with an AxiosError on a
+ * non-2xx status. Split from the caching wrapper above so the URL handling can
+ * be tested without the network.
+ */
+export async function loadFrameworkIndexNodes(
+  topLevelFramework: string,
+  get: (url: string) => Promise<unknown>
+): Promise<AppleDocIndexNode[]> {
+  // Apple has served this file both with and without a `.json` suffix (the
+  // suffixed form began returning 404 in 2026). Try the current form first and
+  // fall back only on a 404 — any other failure (timeout, 5xx) is surfaced
+  // rather than doubling the wait during an outage.
+  const base = `${APPLE_DOCS_BASE_URL}/index/${topLevelFramework}`;
+  let data: AppleDocIndexResponse | null;
+  try {
+    data = (await get(base)) as AppleDocIndexResponse | null;
+  } catch (error) {
+    if (!(error instanceof AxiosError) || error.response?.status !== 404) throw error;
+    data = (await get(`${base}.json`)) as AppleDocIndexResponse | null;
+  }
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     throw new Error(`Unexpected response format for framework index "${topLevelFramework}".`);
   }
@@ -268,10 +296,7 @@ async function fetchFrameworkIndex(topLevelFramework: string): Promise<AppleDocI
   const languages = data.interfaceLanguages ?? {};
   const swiftNodes = Array.isArray(languages.swift) ? languages.swift : [];
   const occNodes = Array.isArray(languages.occ) ? languages.occ : [];
-  const nodes = swiftNodes.length ? swiftNodes : occNodes;
-
-  setCachedIndex(topLevelFramework, nodes);
-  return nodes;
+  return swiftNodes.length ? swiftNodes : occNodes;
 }
 
 export interface FlattenedIndexSymbol {

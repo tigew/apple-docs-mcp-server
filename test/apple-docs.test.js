@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { AxiosError } from "axios";
 
 import {
   boundedEditDistance,
+  loadFrameworkIndexNodes,
   dedupeSearchResults,
   formatGlobalSearchResultsMarkdown,
   formatTechnologiesMarkdown,
@@ -1463,4 +1465,103 @@ test("formatGlobalSearchResultsMarkdown renders results and a helpful empty stat
   const empty = formatGlobalSearchResultsMarkdown([], "nonexistent");
   assert.match(empty, /No results found/);
   assert.match(empty, /apple_docs_search/);
+});
+
+// =========================================================================
+// loadFrameworkIndexNodes: which URL the navigator index is fetched from
+// =========================================================================
+
+const INDEX_BASE = "https://developer.apple.com/tutorials/data/index";
+
+// Mirrors the real payload's top-level shape (as served for avfoundation).
+function indexPayload() {
+  return {
+    includedArchiveIdentifiers: ["com.apple.avfoundation"],
+    interfaceLanguages: {
+      occ: [
+        { title: "AVCaptureSession", path: "/documentation/avfoundation/avcapturesession", type: "class" },
+      ],
+      swift: [
+        {
+          title: "AVCaptureSession",
+          path: "/documentation/avfoundation/avcapturesession",
+          type: "class",
+          children: [
+            {
+              title: "var automaticallyRunsDeferredStart: Bool",
+              path: "/documentation/avfoundation/avcapturesession/automaticallyrunsdeferredstart",
+              type: "property",
+              beta: true,
+            },
+          ],
+        },
+      ],
+    },
+    schemaVersion: { major: 0, minor: 1, patch: 2 },
+  };
+}
+
+// Fake HTTP transport. `routes[url]` is either a payload to resolve with or an
+// HTTP status to fail with; any URL not listed fails with 404, like Apple's CDN.
+function fakeIndexTransport(routes) {
+  const requested = [];
+  const get = async (url) => {
+    requested.push(url);
+    const route = Object.prototype.hasOwnProperty.call(routes, url) ? routes[url] : 404;
+    if (typeof route === "number") {
+      throw new AxiosError(
+        `Request failed with status code ${route}`,
+        "ERR_BAD_RESPONSE",
+        undefined,
+        undefined,
+        { status: route }
+      );
+    }
+    return route;
+  };
+  return { get, requested };
+}
+
+test("loadFrameworkIndexNodes reads the index from the suffix-less URL Apple serves", async () => {
+  const transport = fakeIndexTransport({ [`${INDEX_BASE}/avfoundation`]: indexPayload() });
+
+  const nodes = await loadFrameworkIndexNodes("avfoundation", transport.get);
+
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].title, "AVCaptureSession");
+  assert.equal(nodes[0].children[0].title, "var automaticallyRunsDeferredStart: Bool");
+});
+
+test("loadFrameworkIndexNodes falls back to the legacy .json URL when the suffix-less one 404s", async () => {
+  const transport = fakeIndexTransport({ [`${INDEX_BASE}/avfoundation.json`]: indexPayload() });
+
+  const nodes = await loadFrameworkIndexNodes("avfoundation", transport.get);
+
+  assert.equal(nodes[0].title, "AVCaptureSession");
+  assert.deepEqual(transport.requested, [`${INDEX_BASE}/avfoundation`, `${INDEX_BASE}/avfoundation.json`]);
+});
+
+test("loadFrameworkIndexNodes surfaces a server error without trying the fallback URL", async () => {
+  // The fallback URL would succeed here, so an implementation that falls back
+  // on any error (not just 404) resolves instead of rejecting.
+  const transport = fakeIndexTransport({
+    [`${INDEX_BASE}/avfoundation`]: 503,
+    [`${INDEX_BASE}/avfoundation.json`]: indexPayload(),
+  });
+
+  await assert.rejects(
+    loadFrameworkIndexNodes("avfoundation", transport.get),
+    (error) => error.response?.status === 503
+  );
+  assert.deepEqual(transport.requested, [`${INDEX_BASE}/avfoundation`]);
+});
+
+test("loadFrameworkIndexNodes rejects when neither URL exists, so a missing index is not mistaken for an empty one", async () => {
+  const transport = fakeIndexTransport({});
+
+  await assert.rejects(
+    loadFrameworkIndexNodes("notaframework", transport.get),
+    (error) => error.response?.status === 404
+  );
+  assert.deepEqual(transport.requested, [`${INDEX_BASE}/notaframework`, `${INDEX_BASE}/notaframework.json`]);
 });

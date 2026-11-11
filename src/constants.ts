@@ -12,8 +12,13 @@ export const APPLE_DOCS_WEB_BASE = "https://developer.apple.com/documentation";
 // prefix as their canonical internal path.
 export const APPLE_DESIGN_PATH_PREFIX = "design/";
 // Global cross-framework search — the same API the developer.apple.com search
-// page calls (POST {text, targetResultLocale}). Unofficial, like the docs API.
-export const APPLE_GLOBAL_SEARCH_URL = "https://devintserv.msc.sbz.apple.com/api/v1/search";
+// page calls (POST {text, targetResultLocale, includedResponses}), answering
+// with a JSON Lines stream of diffs. Unofficial, like the docs API. (The
+// earlier /api/v1/search endpoint, which returned plain JSON, now 404s.)
+export const APPLE_GLOBAL_SEARCH_URL = "https://devintserv.msc.sbz.apple.com/api/v1/query";
+// The search backend is slow (4-8s is typical), so it gets more headroom than
+// REQUEST_TIMEOUT_MS.
+export const GLOBAL_SEARCH_TIMEOUT_MS = 30000;
 // Hosts the documentation clients are permitted to reach — enforced on every
 // redirect hop so a 3xx can't smuggle a fetch to another host.
 export const APPLE_DEV_HOST = "developer.apple.com";

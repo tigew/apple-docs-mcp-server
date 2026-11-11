@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { AxiosError } from "axios";
 
 import {
+  assembleSearchStream,
   boundedEditDistance,
   loadFrameworkIndexNodes,
   dedupeSearchResults,
@@ -1378,48 +1379,134 @@ test("resolveFromIndexSymbols auto-resolves an exact symbol name found at one ot
 });
 
 test("parseGlobalSearchResponse validates permalinks, dedupes, and extracts framework names", () => {
+  // Shape of the assembled /api/v1/query "search" document (see assembleSearchStream).
   const data = {
     results: [
       {
-        documentation: {
+        excerpt: "Contextual clues the system uses to show relevant widgets in the Smart Stack on watchOS.",
+        value: {
           metadata: {
-            title: "RelevantContext",
-            permalink: "https://developer.apple.com/documentation/relevancekit/relevantcontext",
-            hierarchy: "RelevanceKit > RelevantContext",
+            availability: "iOS 17.0+ | watchOS 10.0+",
             description: "Contextual clues.",
-            availability: "iOS 17.0+",
+            hierarchy: "RelevanceKit > RelevantContext",
+            kind: "symbol",
+            metadataKind: "documentation",
+            permalink: "https://developer.apple.com/documentation/relevancekit/relevantcontext",
+            title: "RelevantContext",
           },
+          origin: "documentation",
         },
       },
       {
-        documentation: {
+        value: {
           metadata: {
+            metadataKind: "documentation",
             title: "Duplicate",
             permalink: "https://developer.apple.com/documentation/relevancekit/relevantcontext",
           },
+          origin: "documentation",
         },
       },
       {
-        documentation: {
+        value: {
           metadata: {
+            metadataKind: "documentation",
             title: "Evil",
             permalink: "https://evil.example.com/documentation/relevancekit/relevantcontext",
           },
+          origin: "documentation",
         },
       },
-      { notDocumentation: {} },
+      {
+        // Video hits use plural array fields and are not documentation pages.
+        value: {
+          metadata: {
+            metadataKind: "developer",
+            itemTypes: ["Video"],
+            titles: ["What's new in Swift"],
+            permalinks: ["https://developer.apple.com/videos/play/wwdc2024/10136/"],
+          },
+          origin: "developer",
+        },
+      },
+      {
+        value: {
+          metadata: {
+            metadataKind: "webPage",
+            title: "WWDC26 Swift guide",
+            description: "Highlights.",
+            sourceURL: "https://developer.apple.com/swift/",
+          },
+        },
+      },
+      { notAResult: {} },
     ],
   };
 
   const results = parseGlobalSearchResponse(data, 10);
   assert.equal(results.length, 1);
+  assert.equal(results[0].title, "RelevantContext");
   assert.equal(results[0].path, "relevancekit/relevantcontext");
   assert.equal(results[0].framework, "RelevanceKit");
-  assert.equal(results[0].availability, "iOS 17.0+");
+  assert.equal(results[0].description, "Contextual clues.");
+  assert.equal(results[0].availability, "iOS 17.0+ | watchOS 10.0+");
   assert.equal(results[0].webUrl, "https://developer.apple.com/documentation/relevancekit/relevantcontext");
 
   assert.deepEqual(parseGlobalSearchResponse(null, 5), []);
   assert.deepEqual(parseGlobalSearchResponse({ error: { message: "nope" } }, 5), []);
+});
+
+test("parseGlobalSearchResponse falls back to the excerpt when a hit has no description", () => {
+  const data = {
+    results: [
+      {
+        excerpt: "init?(coder: NSCoder)",
+        value: {
+          metadata: {
+            availability: "iOS 10.0+",
+            description: "",
+            hierarchy: "CloudKit > CKShare.Metadata > init(coder:)",
+            kind: "symbol",
+            metadataKind: "documentation",
+            permalink: "https://developer.apple.com/documentation/cloudkit/ckshare/metadata/init(coder:)",
+            title: "init(coder:)",
+          },
+          origin: "documentation",
+        },
+      },
+    ],
+  };
+
+  const results = parseGlobalSearchResponse(data, 10);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].description, "init?(coder: NSCoder)");
+  assert.equal(results[0].framework, "CloudKit");
+});
+
+// =========================================================================
+// assembleSearchStream: decoding the streamed /api/v1/query response
+// =========================================================================
+
+test("assembleSearchStream applies removeLast before append and ignores other event kinds", () => {
+  const stream = [
+    JSON.stringify({ kind: "quickSearch", diff: { append: "ignored" } }),
+    JSON.stringify({ kind: "search", diff: { removeLast: 0, append: '{"results":[{"excerpt":"Contextual clu"}]}' } }),
+    // Drops the trailing `"}]}` (4 chars), then extends the excerpt and adds a second hit.
+    JSON.stringify({ kind: "search", diff: { removeLast: 4, append: 'es."},{"excerpt":"Second"}]}' } }),
+    JSON.stringify({ kind: "searchFinished" }),
+  ].join("\n");
+
+  assert.deepEqual(assembleSearchStream(stream), {
+    results: [{ excerpt: "Contextual clues." }, { excerpt: "Second" }],
+  });
+});
+
+test("assembleSearchStream rejects a stream that never yields a complete result document", () => {
+  const truncated = JSON.stringify({ kind: "search", diff: { removeLast: 0, append: '{"results":[{"excerpt":"cut o' } });
+  assert.throws(() => assembleSearchStream(truncated), /global search/i);
+
+  const noSearchEvents = JSON.stringify({ kind: "searchFinished" });
+  assert.throws(() => assembleSearchStream(noSearchEvents), /global search/i);
 });
 
 test("formatTechnologiesMarkdown compact mode drops abstracts but keeps every framework", () => {
